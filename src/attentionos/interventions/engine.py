@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime
+from typing import TYPE_CHECKING
 
 from attentionos.models.baseline import BaselineRuleEngine
-from attentionos.models.trainer import PersonalStateModel
 from attentionos.storage.schema import Intervention, InterventionType, ReasonCode
+
+if TYPE_CHECKING:
+    from attentionos.models.trainer import PersonalStateModel
 
 logger = logging.getLogger(__name__)
 
