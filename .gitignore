@@ -1,0 +1,58 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Distribution / packaging
+build/
+dist/
+*.egg-info/
+*.egg
+*.spec
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+Thumbs.db
+.DS_Store
+
+# Environment and secrets
+.env
+.env.*
+
+# Personal telemetry data - never commit
+data/personal/
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+
+# Generated data and ML artifacts
+catboost_info/
+data/models/
+data/raw/
+data/processed/
+models/*.pkl
+models/*.cbm
+models/*.joblib
+
+# Parquet exports with personal data
+data/export/
+
+# Logs
+*.log
+
+# Test and notebook caches
+.pytest_cache/
+.ruff_cache/
+.ipynb_checkpoints/
