@@ -72,6 +72,10 @@ class IdleTracker:
         """Approximate total seconds the user has been idle since creation."""
         return self._total_idle_time
 
+    def set_threshold(self, idle_threshold_sec: float) -> None:
+        """Update idle threshold without recreating the tracker."""
+        self._threshold = idle_threshold_sec
+
     def poll(self) -> tuple[float, bool, bool]:
         """Poll the current idle duration and update state.
 

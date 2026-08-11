@@ -34,9 +34,7 @@ class CollectorEngine:
     ) -> None:
         self._config = config or get_config()
         self._runtime_settings = runtime_settings or RuntimeSettings()
-        self._foreground = ForegroundTracker(
-            hash_titles=not self._runtime_settings.tracking.track_window_titles
-        )
+        self._foreground = ForegroundTracker(hash_titles=True)
         self._idle = IdleTracker(
             idle_threshold_sec=self._runtime_settings.tracking.idle_threshold_minutes * 60
         )
@@ -66,6 +64,17 @@ class CollectorEngine:
         """Set the current task label for incoming events."""
         self._current_task_label = label
         logger.info("Task label set to: %s", label)
+
+    def update_runtime_settings(self, settings: RuntimeSettings) -> None:
+        """Apply runtime settings without restarting the collector thread."""
+        self._runtime_settings = settings
+        self._idle.set_threshold(settings.tracking.idle_threshold_minutes * 60)
+        self._excluded_apps = {
+            item.strip().lower()
+            for item in settings.tracking.excluded_applications
+            if item.strip()
+        }
+        logger.info("Collector runtime settings updated.")
 
     # -----------------------------------------------------------------------
     # Core loop

@@ -4,8 +4,11 @@ from __future__ import annotations
 
 import logging
 import shutil
+import sys
 import threading
 import tkinter as tk
+import winreg
+from contextlib import suppress
 from datetime import UTC, date, datetime, timedelta
 from tkinter import filedialog, messagebox, ttk
 
@@ -15,7 +18,7 @@ from attentionos.collector.engine import CollectorEngine
 from attentionos.config import AppConfig, get_config
 from attentionos.desktop.components.diagnostics import DiagnosticsDrawer
 from attentionos.desktop.components.self_report import SelfReportDialog
-from attentionos.desktop.theme import COLORS, TYPOGRAPHY
+from attentionos.desktop.theme import COLORS, TYPOGRAPHY, apply_color_theme
 from attentionos.desktop.view_model import build_dashboard_snapshot
 from attentionos.desktop.views.dashboard import DashboardView
 from attentionos.desktop.views.settings import SettingsWindow
@@ -38,6 +41,7 @@ class AttentionOSDesktopApp(tk.Tk):
         self.settings_store = SettingsStore(self.config.data_dir / "settings.json")
         self.runtime_settings = self.settings_store.load()
         self.translator = Translator(self.runtime_settings.preferences.language)
+        apply_color_theme(self._effective_theme())
 
         self.title(self.translator.t("app.title"))
         self.geometry("1180x760")
@@ -52,6 +56,19 @@ class AttentionOSDesktopApp(tk.Tk):
         self.task_var = tk.StringVar(value="None")
 
         self._configure_styles()
+        self.dashboard: DashboardView | None = None
+        self._build_dashboard()
+        if self.runtime_settings.preferences.start_minimized:
+            self.withdraw()
+        self._refresh_dashboard()
+        self.after(1000, self._tick)
+        self.protocol("WM_DELETE_WINDOW", self._on_close)
+
+    def _build_dashboard(self) -> None:
+        if self.dashboard is not None:
+            self.dashboard.destroy()
+        self.configure(bg=COLORS.background)
+        self.title(self.translator.t("app.title"))
         self.dashboard = DashboardView(
             self,
             task_var=self.task_var,
@@ -68,17 +85,35 @@ class AttentionOSDesktopApp(tk.Tk):
             translator=self.translator,
         )
         self.dashboard.pack(fill="both", expand=True)
-        if self.runtime_settings.preferences.start_minimized:
-            self.withdraw()
-        self._refresh_dashboard()
-        self.after(1000, self._tick)
-        self.protocol("WM_DELETE_WINDOW", self._on_close)
+
+    def _effective_theme(self) -> str:
+        theme = self.runtime_settings.preferences.theme
+        if theme == "dark":
+            return "dark"
+        return "light"
 
     def _configure_styles(self) -> None:
         style = ttk.Style(self)
         style.theme_use("clam")
         style.configure(".", font=TYPOGRAPHY.body)
         style.configure("TFrame", background=COLORS.background)
+        style.configure(
+            "TNotebook",
+            background=COLORS.background,
+            bordercolor=COLORS.border,
+        )
+        style.configure(
+            "TNotebook.Tab",
+            background=COLORS.surface_secondary,
+            foreground=COLORS.text_secondary,
+            padding=(12, 8),
+            font=TYPOGRAPHY.body_semibold,
+        )
+        style.map(
+            "TNotebook.Tab",
+            background=[("selected", COLORS.surface)],
+            foreground=[("selected", COLORS.text)],
+        )
 
     def _start_collector(self) -> None:
         if self.collector_thread and self.collector_thread.is_alive():
@@ -109,7 +144,9 @@ class AttentionOSDesktopApp(tk.Tk):
         if self.collector is not None:
             self.collector.stop()
         if self.collector_thread is not None:
-            self.collector_thread.join(timeout=2.5)
+            self.collector_thread.join(timeout=8.0)
+            if not self.collector_thread.is_alive():
+                self.collector_thread = None
         self._update_tracking_status()
 
     def _collector_failed(self) -> None:
@@ -182,10 +219,42 @@ class AttentionOSDesktopApp(tk.Tk):
         )
 
     def _save_settings(self, settings: RuntimeSettings) -> None:
+        was_tracking = (
+            self.collector_thread is not None and self.collector_thread.is_alive()
+        )
         self.runtime_settings = settings
         self.settings_store.save(settings)
+        self._apply_startup_setting(settings.preferences.launch_on_startup)
+        if was_tracking and self.collector is not None:
+            self.collector.update_runtime_settings(settings)
         self.translator.set_language(settings.preferences.language)
-        messagebox.showinfo("AttentionOS", self.translator.t("settings.apply_restart"))
+        apply_color_theme(self._effective_theme())
+        self._configure_styles()
+        self._build_dashboard()
+        self._refresh_dashboard()
+        self._update_tracking_status()
+
+    def _apply_startup_setting(self, enabled: bool) -> None:
+        try:
+            with winreg.OpenKey(
+                winreg.HKEY_CURRENT_USER,
+                r"Software\Microsoft\Windows\CurrentVersion\Run",
+                0,
+                winreg.KEY_SET_VALUE,
+            ) as key:
+                if enabled:
+                    winreg.SetValueEx(
+                        key,
+                        "AttentionOS",
+                        0,
+                        winreg.REG_SZ,
+                        sys.executable,
+                    )
+                else:
+                    with suppress(FileNotFoundError):
+                        winreg.DeleteValue(key, "AttentionOS")
+        except OSError:
+            logger.exception("Could not update Windows startup setting.")
 
     def _model_counts(self) -> dict[str, int]:
         with get_session(self.config.db_path) as session:
@@ -256,7 +325,8 @@ class AttentionOSDesktopApp(tk.Tk):
             hours, remainder = divmod(uptime, 3600)
             minutes, seconds = divmod(remainder, 60)
             elapsed = f"{hours:02d}:{minutes:02d}:{seconds:02d}"
-        self.dashboard.set_tracking(active, elapsed)
+        if self.dashboard is not None:
+            self.dashboard.set_tracking(active, elapsed)
 
     def _update_diagnostics(self) -> None:
         if self.diagnostics is None or not self.diagnostics.winfo_exists():
@@ -277,9 +347,13 @@ class AttentionOSDesktopApp(tk.Tk):
     def _refresh_dashboard(self) -> None:
         events = list(get_daily_events(self.selected_date, self.config.db_path))
         snapshot = build_dashboard_snapshot(events, self.selected_date)
-        self.dashboard.apply_snapshot(snapshot)
+        if self.dashboard is not None:
+            self.dashboard.apply_snapshot(snapshot)
 
     def _on_close(self) -> None:
+        if self.runtime_settings.preferences.minimize_to_tray:
+            self.iconify()
+            return
         self._stop_collector()
         self.destroy()
 
