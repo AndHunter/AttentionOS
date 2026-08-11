@@ -19,6 +19,19 @@ python -m PyInstaller `
     --windowed `
     --onefile `
     --name AttentionOS `
+    --exclude-module pandas `
+    --exclude-module numpy `
+    --exclude-module scipy `
+    --exclude-module sklearn `
+    --exclude-module catboost `
+    --exclude-module torch `
+    --exclude-module torchvision `
+    --exclude-module torchaudio `
+    --exclude-module streamlit `
+    --exclude-module plotly `
+    --exclude-module pytest `
+    --exclude-module IPython `
+    --collect-data attentionos.localization `
     --paths "$Root\src" `
     "$Root\src\attentionos\desktop\app.py"
 

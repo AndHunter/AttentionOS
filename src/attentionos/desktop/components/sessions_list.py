@@ -7,27 +7,29 @@ import tkinter as tk
 from attentionos.desktop.components.base import Card
 from attentionos.desktop.theme import COLORS, SPACING, TYPOGRAPHY
 from attentionos.desktop.view_model import clean_app_name, format_duration
+from attentionos.localization import Translator
 from attentionos.storage.schema import Session
 
 
 class RecentSessionsList(Card):
     """Modern list-style replacement for raw TreeView."""
 
-    def __init__(self, master: tk.Misc) -> None:
+    def __init__(self, master: tk.Misc, translator: Translator) -> None:
         super().__init__(master, padding=SPACING.lg)
+        self.translator = translator
         header = tk.Frame(self.inner, bg=COLORS.surface)
         header.pack(fill="x")
         header.columnconfigure(0, weight=1)
         tk.Label(
             header,
-            text="Recent sessions",
+            text=translator.t("dashboard.recent_sessions"),
             bg=COLORS.surface,
             fg=COLORS.text,
             font=TYPOGRAPHY.section,
         ).grid(row=0, column=0, sticky="w")
         tk.Label(
             header,
-            text="View all ->",
+            text=translator.t("dashboard.view_all") + " ->",
             bg=COLORS.surface,
             fg=COLORS.accent,
             font=TYPOGRAPHY.caption_semibold,

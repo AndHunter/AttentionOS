@@ -18,16 +18,18 @@ from attentionos.desktop.view_model import (
     compute_current_state,
     format_duration,
 )
+from attentionos.localization import Translator
 
 
 class ActivityPattern(Card):
     """Simple focus/activity pattern chart from existing switch windows."""
 
-    def __init__(self, master: tk.Misc) -> None:
+    def __init__(self, master: tk.Misc, translator: Translator) -> None:
         super().__init__(master, padding=SPACING.lg)
+        self.translator = translator
         tk.Label(
             self.inner,
-            text="Activity pattern",
+            text=translator.t("dashboard.activity_pattern"),
             bg=COLORS.surface,
             fg=COLORS.text,
             font=TYPOGRAPHY.section,
@@ -60,7 +62,7 @@ class ActivityPattern(Card):
             self.canvas.create_text(
                 width / 2,
                 height / 2,
-                text="Switching trend appears here after multiple sessions.",
+                text=self.translator.t("dashboard.activity_empty"),
                 fill=COLORS.text_secondary,
                 font=TYPOGRAPHY.caption,
             )
@@ -90,9 +92,11 @@ class DashboardView(tk.Frame):
         task_var: tk.StringVar,
         task_labels: list[str],
         callbacks: dict[str, Callable[[], None]],
+        translator: Translator,
     ) -> None:
         super().__init__(master, bg=COLORS.background)
         self.callbacks = callbacks
+        self.translator = translator
         self.columnconfigure(0, weight=1)
         self.rowconfigure(4, weight=1)
 
@@ -105,6 +109,7 @@ class DashboardView(tk.Frame):
             on_start=callbacks["start"],
             on_stop=callbacks["stop"],
             on_check_in=callbacks["check_in"],
+            translator=translator,
         )
         self.tracking.grid(row=1, column=0, sticky="ew", padx=SPACING.xl, pady=(0, SPACING.md))
         self._build_metrics()
@@ -118,7 +123,7 @@ class DashboardView(tk.Frame):
         bar.columnconfigure(0, weight=1)
         tk.Label(
             bar,
-            text="AttentionOS",
+            text=self.translator.t("dashboard.title"),
             bg=COLORS.background,
             fg=COLORS.text,
             font=TYPOGRAPHY.page_title,
@@ -133,7 +138,7 @@ class DashboardView(tk.Frame):
         ).grid(row=1, column=0, sticky="w", pady=(SPACING.xxs, 0))
         right = tk.Frame(bar, bg=COLORS.background)
         right.grid(row=0, column=1, rowspan=2, sticky="e")
-        self.privacy_var = tk.StringVar(value="Local only")
+        self.privacy_var = tk.StringVar(value=self.translator.t("app.local_only"))
         tk.Label(
             right,
             textvariable=self.privacy_var,
@@ -143,7 +148,11 @@ class DashboardView(tk.Frame):
             padx=SPACING.sm,
             pady=SPACING.xs,
         ).pack(side="left", padx=(0, SPACING.xs))
-        TextButton(right, "Settings", self.callbacks["diagnostics"]).pack(side="left")
+        TextButton(
+            right,
+            self.translator.t("app.settings"),
+            self.callbacks["settings"],
+        ).pack(side="left")
 
     def _build_metrics(self) -> None:
         grid = tk.Frame(self, bg=COLORS.background)
@@ -151,15 +160,15 @@ class DashboardView(tk.Frame):
         grid.columnconfigure(0, weight=2, uniform="metrics")
         for idx in range(1, 5):
             grid.columnconfigure(idx, weight=1, uniform="metrics")
-        self.state_card = MetricCard(grid, "Current state", large=True)
+        self.state_card = MetricCard(grid, self.translator.t("metrics.current_state"), large=True)
         self.state_card.grid(row=0, column=0, sticky="nsew", padx=(0, SPACING.sm))
-        self.focused_card = MetricCard(grid, "Focused time")
+        self.focused_card = MetricCard(grid, self.translator.t("metrics.focused_time"))
         self.focused_card.grid(row=0, column=1, sticky="nsew", padx=(0, SPACING.sm))
-        self.active_card = MetricCard(grid, "Active time")
+        self.active_card = MetricCard(grid, self.translator.t("metrics.active_time"))
         self.active_card.grid(row=0, column=2, sticky="nsew", padx=(0, SPACING.sm))
-        self.avg_card = MetricCard(grid, "Avg focus")
+        self.avg_card = MetricCard(grid, self.translator.t("metrics.avg_focus"))
         self.avg_card.grid(row=0, column=3, sticky="nsew", padx=(0, SPACING.sm))
-        self.switch_card = MetricCard(grid, "Context switches")
+        self.switch_card = MetricCard(grid, self.translator.t("metrics.context_switches"))
         self.switch_card.grid(row=0, column=4, sticky="nsew")
 
     def _build_secondary(self) -> None:
@@ -168,7 +177,7 @@ class DashboardView(tk.Frame):
         lower.columnconfigure(0, weight=1)
         lower.columnconfigure(1, weight=1)
         lower.rowconfigure(1, weight=1)
-        self.pattern = ActivityPattern(lower)
+        self.pattern = ActivityPattern(lower, self.translator)
         self.pattern.grid(
             row=0,
             column=0,
@@ -176,9 +185,9 @@ class DashboardView(tk.Frame):
             padx=(0, SPACING.sm),
             pady=(0, SPACING.md),
         )
-        self.top_apps = TopAppsList(lower)
+        self.top_apps = TopAppsList(lower, self.translator)
         self.top_apps.grid(row=0, column=1, sticky="nsew", pady=(0, SPACING.md))
-        self.sessions = RecentSessionsList(lower)
+        self.sessions = RecentSessionsList(lower, self.translator)
         self.sessions.grid(row=1, column=0, columnspan=2, sticky="nsew")
 
     def apply_snapshot(self, snapshot: DashboardSnapshot) -> None:

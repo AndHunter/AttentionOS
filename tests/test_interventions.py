@@ -21,7 +21,7 @@ def test_ml_intervention_matches_schema() -> None:
     intervention = engine.evaluate({}, datetime(2026, 8, 10, 12, 0, tzinfo=UTC))
 
     assert intervention is not None
-    assert intervention.type == InterventionType.BREAK
+    assert intervention.type == InterventionType.BREAK_10
     assert intervention.reason_code == ReasonCode.BASELINE_DEVIATION
     assert intervention.predicted_state == 0.9
     assert intervention.confidence == 0.8

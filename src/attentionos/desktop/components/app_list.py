@@ -7,17 +7,19 @@ import tkinter as tk
 from attentionos.desktop.components.base import Card
 from attentionos.desktop.theme import COLORS, SPACING, TYPOGRAPHY
 from attentionos.desktop.view_model import TopApp, format_duration
+from attentionos.localization import Translator
 
 
 class TopAppsList(Card):
     """Compact ranked list of top applications."""
 
-    def __init__(self, master: tk.Misc) -> None:
+    def __init__(self, master: tk.Misc, translator: Translator) -> None:
         super().__init__(master, padding=SPACING.lg)
+        self.translator = translator
         self.rows = tk.Frame(self.inner, bg=COLORS.surface)
         tk.Label(
             self.inner,
-            text="Top apps",
+            text=translator.t("dashboard.top_apps"),
             bg=COLORS.surface,
             fg=COLORS.text,
             font=TYPOGRAPHY.section,
@@ -30,7 +32,7 @@ class TopAppsList(Card):
         if not apps:
             tk.Label(
                 self.rows,
-                text="No active apps yet",
+                text=self.translator.t("metrics.not_enough_data"),
                 bg=COLORS.surface,
                 fg=COLORS.text_secondary,
                 font=TYPOGRAPHY.body,

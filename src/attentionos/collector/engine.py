@@ -12,6 +12,7 @@ from attentionos.collector.foreground import ForegroundTracker
 from attentionos.collector.idle import IdleTracker
 from attentionos.collector.input_activity import InputCounter
 from attentionos.config import AppConfig, get_config
+from attentionos.settings import RuntimeSettings
 from attentionos.storage.db import init_db, insert_events_batch
 from attentionos.storage.schema import ActivityEvent
 
@@ -26,13 +27,18 @@ class CollectorEngine:
     Handles graceful shutdown via signals and sleep/wake detection.
     """
 
-    def __init__(self, config: AppConfig | None = None) -> None:
+    def __init__(
+        self,
+        config: AppConfig | None = None,
+        runtime_settings: RuntimeSettings | None = None,
+    ) -> None:
         self._config = config or get_config()
+        self._runtime_settings = runtime_settings or RuntimeSettings()
         self._foreground = ForegroundTracker(
-            hash_titles=not self._config.collector.store_window_titles
+            hash_titles=not self._runtime_settings.tracking.track_window_titles
         )
         self._idle = IdleTracker(
-            idle_threshold_sec=self._config.collector.idle_threshold_sec
+            idle_threshold_sec=self._runtime_settings.tracking.idle_threshold_minutes * 60
         )
         self._input = InputCounter()
 
@@ -41,6 +47,11 @@ class CollectorEngine:
         self._running = False
         self._current_task_label: str | None = None
         self._last_event: ActivityEvent | None = None
+        self._excluded_apps = {
+            item.strip().lower()
+            for item in self._runtime_settings.tracking.excluded_applications
+            if item.strip()
+        }
 
         # Statistics
         self._total_events: int = 0
@@ -65,20 +76,34 @@ class CollectorEngine:
         now = datetime.now(tz=UTC)
 
         # 1. Foreground window
-        fg_info, _is_switch = self._foreground.poll()
+        if self._runtime_settings.tracking.track_active_window:
+            fg_info, _is_switch = self._foreground.poll()
+            process_name = fg_info.process_name
+            window_title_hash = (
+                fg_info.window_title_hash or None
+                if self._runtime_settings.tracking.track_window_titles
+                else None
+            )
+        else:
+            process_name = "Tracking disabled"
+            window_title_hash = None
 
         # 2. Idle state
         idle_sec, _is_idle, _became_idle = self._idle.poll()
 
         # 3. Input counts (since last poll)
         kb_count, mouse_count = self._input.get_and_reset()
+        if not self._runtime_settings.tracking.track_keyboard_activity:
+            kb_count = 0
+        if not self._runtime_settings.tracking.track_mouse_activity:
+            mouse_count = 0
 
         # 4. Build event
         event = ActivityEvent(
             ts_start=now,
             ts_end=now,  # Single-point observation
-            process_name=fg_info.process_name,
-            window_title_hash=fg_info.window_title_hash or None,
+            process_name=process_name,
+            window_title_hash=window_title_hash,
             idle_seconds=idle_sec,
             keyboard_events=kb_count,
             mouse_events=mouse_count,
@@ -88,6 +113,13 @@ class CollectorEngine:
 
         self._last_event = event
         return event
+
+    def _should_ignore(self, event: ActivityEvent) -> bool:
+        process = event.process_name.lower()
+        return any(
+            process == excluded or process.endswith(excluded)
+            for excluded in self._excluded_apps
+        )
 
     def _should_flush(self) -> bool:
         """Determine if the event batch should be flushed to the database."""
@@ -176,8 +208,9 @@ class CollectorEngine:
                 # Collect one event
                 try:
                     event = self._collect_one()
-                    self._batch.append(event)
-                    self._total_events += 1
+                    if not self._should_ignore(event):
+                        self._batch.append(event)
+                        self._total_events += 1
                 except Exception:
                     logger.exception("Error during collection.")
 
@@ -209,6 +242,7 @@ class CollectorEngine:
     def stop(self) -> None:
         """Signal the collector loop to stop."""
         self._running = False
+        self._input.stop()
 
     @property
     def stats(self) -> dict[str, float | int]:

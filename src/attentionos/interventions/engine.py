@@ -120,7 +120,7 @@ class InterventionEngine:
 
             return Intervention(
                 timestamp=at_time,
-                type=InterventionType.BREAK,
+                type=InterventionType.BREAK_10,
                 reason_code=self.REASON_BY_TRIGGER.get(trigger),
                 predicted_state=max(ml_prob, baseline_risk),
                 confidence=ml_conf if ml_prob > 0 else min(max(baseline_risk, 0.0), 1.0),

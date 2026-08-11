@@ -15,10 +15,10 @@ from sqlmodel import Field, SQLModel
 class InterventionType(enum.StrEnum):
     """Types of recommended interventions."""
 
-    BREAK = "break"
+    BREAK_10 = "break_10"
+    BREAK_20 = "break_20"
     CONTINUE = "continue"
     SWITCH_TASK = "switch_task"
-    STOP = "stop"
 
 
 class ReasonCode(enum.StrEnum):
@@ -100,6 +100,21 @@ class SelfReport(SQLModel, table=True):
     id: int | None = Field(default=None, primary_key=True)
 
     timestamp: datetime = Field(index=True)
+    task_name: str | None = Field(
+        default=None,
+        max_length=64,
+        description="Task label selected when the report was created.",
+    )
+    telemetry_window_start: datetime | None = Field(
+        default=None,
+        index=True,
+        description="Start of the telemetry window used for supervised features.",
+    )
+    telemetry_window_end: datetime | None = Field(
+        default=None,
+        index=True,
+        description="End of the telemetry window used for supervised features.",
+    )
 
     perceived_effectiveness: int = Field(
         ge=1, le=5, description="Self-rated effectiveness 1 (very low) to 5 (very high)."
@@ -134,14 +149,25 @@ class Intervention(SQLModel, table=True):
         default=None, description="Why the intervention was triggered."
     )
 
+    pre_state: str | None = Field(
+        default=None,
+        description="JSON snapshot of the state before the intervention.",
+    )
+    post_report_id: int | None = Field(
+        default=None,
+        foreign_key="self_reports.id",
+        description="Optional self-report collected after the intervention.",
+    )
     predicted_state: float = Field(
+        default=0.0,
         description="Model's predicted state score at the time of recommendation."
     )
     confidence: float = Field(
-        ge=0.0, le=1.0, description="Model's confidence in the prediction."
+        default=0.0, ge=0.0, le=1.0, description="Model's confidence in the prediction."
     )
 
-    accepted: bool = Field(description="Whether the user accepted the recommendation.")
+    accepted: bool = Field(default=False, description="Whether the user accepted it.")
+    completed: bool = Field(default=False, description="Whether the user completed it.")
 
     duration_minutes: int | None = Field(
         default=None,
@@ -198,3 +224,13 @@ class Session(SQLModel, table=True):
     total_keyboard_events: int = Field(default=0, ge=0)
     total_mouse_events: int = Field(default=0, ge=0)
     avg_idle_seconds: float = Field(default=0.0, ge=0.0)
+
+
+class SchemaVersion(SQLModel, table=True):
+    """SQLite schema version marker for safe migrations."""
+
+    __tablename__ = "schema_version"
+
+    id: int | None = Field(default=None, primary_key=True)
+    version: int = Field(index=True)
+    applied_at: datetime = Field(default_factory=datetime.utcnow)

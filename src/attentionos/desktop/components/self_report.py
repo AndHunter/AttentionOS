@@ -7,6 +7,7 @@ from collections.abc import Callable
 
 from attentionos.desktop.components.base import TextButton
 from attentionos.desktop.theme import COLORS, SPACING, TYPOGRAPHY
+from attentionos.localization import Translator
 
 
 class RatingGroup(tk.Frame):
@@ -59,10 +60,11 @@ class SelfReportDialog(tk.Toplevel):
         self,
         master: tk.Misc,
         on_save: Callable[[int, int, int | None, str | None], None],
+        translator: Translator,
     ) -> None:
         super().__init__(master)
         self.on_save = on_save
-        self.title("Check in")
+        self.title(translator.t("tracking.check_in"))
         self.configure(bg=COLORS.background)
         self.resizable(False, False)
         self.transient(master)
@@ -79,29 +81,29 @@ class SelfReportDialog(tk.Toplevel):
 
         tk.Label(
             shell,
-            text="How was that session?",
+            text=translator.t("self_report.title"),
             bg=COLORS.surface,
             fg=COLORS.text,
             font=TYPOGRAPHY.page_title,
         ).grid(row=0, column=0, sticky="w", padx=SPACING.lg, pady=(SPACING.lg, SPACING.xs))
         tk.Label(
             shell,
-            text="A quick signal helps calibrate your personal model.",
+            text=translator.t("self_report.subtitle"),
             bg=COLORS.surface,
             fg=COLORS.text_secondary,
             font=TYPOGRAPHY.body,
         ).grid(row=1, column=0, sticky="w", padx=SPACING.lg)
 
-        self.effectiveness = RatingGroup(shell, "Effectiveness", 3)
+        self.effectiveness = RatingGroup(shell, translator.t("self_report.effectiveness"), 3)
         self.effectiveness.grid(row=2, column=0, sticky="w", padx=SPACING.lg, pady=(SPACING.lg, 0))
-        self.fatigue = RatingGroup(shell, "Fatigue", 2)
+        self.fatigue = RatingGroup(shell, translator.t("self_report.fatigue"), 2)
         self.fatigue.grid(row=3, column=0, sticky="w", padx=SPACING.lg, pady=(SPACING.md, 0))
-        self.difficulty = RatingGroup(shell, "Difficulty", 3)
+        self.difficulty = RatingGroup(shell, translator.t("self_report.difficulty"), 3)
         self.difficulty.grid(row=4, column=0, sticky="w", padx=SPACING.lg, pady=(SPACING.md, 0))
 
         tk.Label(
             shell,
-            text="Optional note",
+            text=translator.t("self_report.note"),
             bg=COLORS.surface,
             fg=COLORS.text,
             font=TYPOGRAPHY.body_semibold,
@@ -118,8 +120,15 @@ class SelfReportDialog(tk.Toplevel):
 
         actions = tk.Frame(shell, bg=COLORS.surface)
         actions.grid(row=7, column=0, sticky="e", padx=SPACING.lg, pady=SPACING.lg)
-        TextButton(actions, "Skip", self.destroy).pack(side="left", padx=(0, SPACING.xs))
-        TextButton(actions, "Save report", self._save, variant="primary").pack(side="left")
+        TextButton(actions, translator.t("self_report.skip"), self.destroy).pack(
+            side="left", padx=(0, SPACING.xs)
+        )
+        TextButton(
+            actions,
+            translator.t("self_report.save"),
+            self._save,
+            variant="primary",
+        ).pack(side="left")
 
         self.update_idletasks()
         x = master.winfo_rootx() + max((master.winfo_width() - self.winfo_width()) // 2, 0)

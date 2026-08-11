@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import logging
+import shutil
 import threading
 import tkinter as tk
-from datetime import UTC, date, datetime
-from tkinter import messagebox, ttk
+from datetime import UTC, date, datetime, timedelta
+from tkinter import filedialog, messagebox, ttk
+
+from sqlmodel import delete, select
 
 from attentionos.collector.engine import CollectorEngine
 from attentionos.config import AppConfig, get_config
@@ -15,8 +18,11 @@ from attentionos.desktop.components.self_report import SelfReportDialog
 from attentionos.desktop.theme import COLORS, TYPOGRAPHY
 from attentionos.desktop.view_model import build_dashboard_snapshot
 from attentionos.desktop.views.dashboard import DashboardView
-from attentionos.storage.db import get_daily_events, init_db, insert_self_report
-from attentionos.storage.schema import SelfReport
+from attentionos.desktop.views.settings import SettingsWindow
+from attentionos.localization import Translator
+from attentionos.settings import RuntimeSettings, SettingsStore
+from attentionos.storage.db import get_daily_events, get_session, init_db, insert_self_report
+from attentionos.storage.schema import ActivityEvent, SelfReport
 
 logger = logging.getLogger(__name__)
 
@@ -29,8 +35,11 @@ class AttentionOSDesktopApp(tk.Tk):
         self.config = config or get_config()
         self.config.ensure_dirs()
         init_db(self.config.db_path)
+        self.settings_store = SettingsStore(self.config.data_dir / "settings.json")
+        self.runtime_settings = self.settings_store.load()
+        self.translator = Translator(self.runtime_settings.preferences.language)
 
-        self.title("AttentionOS")
+        self.title(self.translator.t("app.title"))
         self.geometry("1180x760")
         self.minsize(1000, 700)
         self.configure(bg=COLORS.background)
@@ -54,10 +63,13 @@ class AttentionOSDesktopApp(tk.Tk):
                 "check_in": self._open_self_report,
                 "previous_day": self._previous_day,
                 "next_day": self._next_day,
-                "diagnostics": self._open_diagnostics,
+                "settings": self._open_settings,
             },
+            translator=self.translator,
         )
         self.dashboard.pack(fill="both", expand=True)
+        if self.runtime_settings.preferences.start_minimized:
+            self.withdraw()
         self._refresh_dashboard()
         self.after(1000, self._tick)
         self.protocol("WM_DELETE_WINDOW", self._on_close)
@@ -73,7 +85,7 @@ class AttentionOSDesktopApp(tk.Tk):
             return
 
         self.collector_error = None
-        self.collector = CollectorEngine(self.config)
+        self.collector = CollectorEngine(self.config, self.runtime_settings)
         self._sync_task_label()
 
         def _run() -> None:
@@ -125,7 +137,7 @@ class AttentionOSDesktopApp(tk.Tk):
             self._refresh_dashboard()
 
     def _open_self_report(self) -> None:
-        SelfReportDialog(self, self._save_self_report)
+        SelfReportDialog(self, self._save_self_report, self.translator)
 
     def _save_self_report(
         self,
@@ -136,6 +148,9 @@ class AttentionOSDesktopApp(tk.Tk):
     ) -> None:
         report = SelfReport(
             timestamp=datetime.now(tz=UTC),
+            task_name=None if self.task_var.get() == "None" else self.task_var.get(),
+            telemetry_window_start=datetime.now(tz=UTC) - timedelta(minutes=30),
+            telemetry_window_end=datetime.now(tz=UTC),
             perceived_effectiveness=effectiveness,
             perceived_fatigue=fatigue,
             task_difficulty=difficulty,
@@ -147,6 +162,78 @@ class AttentionOSDesktopApp(tk.Tk):
             messagebox.showerror("AttentionOS", f"Could not save report: {exc}")
             return
         self._refresh_dashboard()
+
+    def _open_settings(self) -> None:
+        counts = self._model_counts()
+        SettingsWindow(
+            self,
+            self.runtime_settings,
+            self.translator,
+            str(self.config.db_path),
+            counts,
+            {
+                "save": self._save_settings,
+                "export": self._export_data,
+                "delete_telemetry": self._delete_telemetry,
+                "delete_reports": self._delete_reports,
+                "delete_model": self._delete_model,
+                "delete_all": self._delete_all_data,
+            },
+        )
+
+    def _save_settings(self, settings: RuntimeSettings) -> None:
+        self.runtime_settings = settings
+        self.settings_store.save(settings)
+        self.translator.set_language(settings.preferences.language)
+        messagebox.showinfo("AttentionOS", self.translator.t("settings.apply_restart"))
+
+    def _model_counts(self) -> dict[str, int]:
+        with get_session(self.config.db_path) as session:
+            events = len(session.exec(select(ActivityEvent)).all())
+            reports = len(session.exec(select(SelfReport)).all())
+        return {
+            "events": events,
+            "reports": reports,
+            "min_training_samples": self.runtime_settings.model.min_training_samples,
+        }
+
+    def _export_data(self) -> None:
+        from attentionos.storage.export import export_data
+
+        output = filedialog.askdirectory(title=self.translator.t("settings.export_data"))
+        if not output:
+            return
+        paths = export_data(output, self.config.db_path, "json")
+        messagebox.showinfo("AttentionOS", f"Exported: {paths[0]}")
+
+    def _confirm(self, message: str) -> bool:
+        return messagebox.askyesno("AttentionOS", message)
+
+    def _delete_telemetry(self) -> None:
+        if not self._confirm(self.translator.t("settings.delete_telemetry")):
+            return
+        with get_session(self.config.db_path) as session:
+            session.exec(delete(ActivityEvent))
+        self._refresh_dashboard()
+
+    def _delete_reports(self) -> None:
+        if not self._confirm(self.translator.t("settings.delete_self_reports")):
+            return
+        with get_session(self.config.db_path) as session:
+            session.exec(delete(SelfReport))
+
+    def _delete_model(self) -> None:
+        model_dir = self.config.data_dir / "models"
+        if model_dir.exists() and self._confirm(self.translator.t("settings.delete_model")):
+            shutil.rmtree(model_dir)
+
+    def _delete_all_data(self) -> None:
+        if not self._confirm(self.translator.t("settings.delete_all")):
+            return
+        self._stop_collector()
+        self._delete_telemetry()
+        self._delete_reports()
+        self._delete_model()
 
     def _open_diagnostics(self) -> None:
         if self.diagnostics is not None and self.diagnostics.winfo_exists():

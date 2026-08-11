@@ -11,6 +11,7 @@ from pathlib import Path
 from sqlmodel import Session as DBSession
 from sqlmodel import SQLModel, create_engine, select
 
+from attentionos.storage.migrations import run_migrations
 from attentionos.storage.schema import ActivityEvent, Intervention, SelfReport, Session
 
 logger = logging.getLogger(__name__)
@@ -58,6 +59,7 @@ def init_db(db_path: Path | str | None = None) -> None:
     """Create all tables if they don't exist yet."""
     engine = get_engine(db_path)
     SQLModel.metadata.create_all(engine)
+    run_migrations(engine)
     logger.info("Database tables initialized.")
 
 

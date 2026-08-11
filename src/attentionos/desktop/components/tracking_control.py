@@ -7,6 +7,7 @@ from collections.abc import Callable
 
 from attentionos.desktop.components.base import Card, TextButton
 from attentionos.desktop.theme import COLORS, SPACING, TYPOGRAPHY
+from attentionos.localization import Translator
 
 
 class TrackingControl(Card):
@@ -21,17 +22,19 @@ class TrackingControl(Card):
         on_start: Callable[[], None],
         on_stop: Callable[[], None],
         on_check_in: Callable[[], None],
+        translator: Translator,
     ) -> None:
         super().__init__(master, padding=SPACING.md)
         self.on_task_change = on_task_change
+        self.translator = translator
         self.is_tracking = False
         self.elapsed_var = tk.StringVar(value="00:00:00")
-        self.status_var = tk.StringVar(value="Ready")
+        self.status_var = tk.StringVar(value=translator.t("tracking.status.stopped"))
 
         self.inner.columnconfigure(1, weight=1)
         tk.Label(
             self.inner,
-            text="Current task",
+            text=translator.t("tracking.current_task"),
             bg=COLORS.surface,
             fg=COLORS.text_secondary,
             font=TYPOGRAPHY.caption_semibold,
@@ -89,19 +92,32 @@ class TrackingControl(Card):
         self.action_holder.grid(row=0, column=2, rowspan=2, sticky="e", padx=(SPACING.lg, 0))
         self.start_button = TextButton(
             self.action_holder,
-            "Start tracking",
+            translator.t("tracking.start"),
             on_start,
             variant="primary",
         )
-        self.stop_button = TextButton(self.action_holder, "Stop", on_stop, variant="danger")
-        self.check_in_button = TextButton(self.action_holder, "Check in", on_check_in)
+        self.stop_button = TextButton(
+            self.action_holder,
+            translator.t("tracking.stop"),
+            on_stop,
+            variant="danger",
+        )
+        self.check_in_button = TextButton(
+            self.action_holder,
+            translator.t("tracking.check_in"),
+            on_check_in,
+        )
         self.check_in_button.pack(side="left", padx=(0, SPACING.xs))
         self.start_button.pack(side="left")
 
     def set_tracking(self, active: bool, elapsed: str = "00:00:00") -> None:
         self.is_tracking = active
         self.elapsed_var.set(elapsed)
-        self.status_var.set("Tracking" if active else "Ready")
+        self.status_var.set(
+            self.translator.t("tracking.status.active")
+            if active
+            else self.translator.t("tracking.status.stopped")
+        )
         self.dot.itemconfigure(self.dot_id, fill=COLORS.success if active else COLORS.idle)
         self.start_button.pack_forget()
         self.stop_button.pack_forget()
