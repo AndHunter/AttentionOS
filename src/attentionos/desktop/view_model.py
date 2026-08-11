@@ -25,6 +25,28 @@ class DashboardSnapshot:
     summary: DailySummary
     switch_windows: list[tuple[int, int]]
 
+    @property
+    def is_today(self) -> bool:
+        return self.target_date == date.today()
+
+
+@dataclass(frozen=True)
+class TopApp:
+    """Ranked app usage entry."""
+
+    name: str
+    seconds: float
+    percent: float
+
+
+@dataclass(frozen=True)
+class CurrentState:
+    """User-facing state summary derived from existing metrics."""
+
+    value: str
+    label: str
+    detail: str
+
 
 def build_dashboard_snapshot(
     events: Sequence[ActivityEvent],
@@ -62,3 +84,34 @@ def clean_app_name(process_name: str) -> str:
     if name.lower().endswith(".exe"):
         name = name[:-4]
     return name
+
+
+def compute_current_state(summary: DailySummary) -> CurrentState:
+    """Derive a conservative current-state display from existing data only."""
+    if summary.total_sessions == 0:
+        return CurrentState("—", "No data yet", "Start tracking to build today's baseline.")
+    if summary.focus_sessions > 0:
+        minutes = int(round(summary.max_focus_block_sec / 60))
+        return CurrentState(
+            str(minutes),
+            "Best focus block",
+            "Minutes, longest focus block.",
+        )
+    if summary.total_active_seconds > 0:
+        return CurrentState(
+            format_duration(summary.total_active_seconds),
+            "Active",
+            "No focus block yet.",
+        )
+    return CurrentState("Idle", "Quiet day", "No active sessions recorded yet.")
+
+
+def build_top_apps(summary: DailySummary, limit: int = 5) -> list[TopApp]:
+    """Return ranked app entries with percentages."""
+    total = sum(seconds for _name, seconds in summary.top_apps)
+    if total <= 0:
+        return []
+    return [
+        TopApp(clean_app_name(name), seconds, seconds / total * 100)
+        for name, seconds in summary.top_apps[:limit]
+    ]
