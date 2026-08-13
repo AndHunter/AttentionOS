@@ -4,6 +4,11 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::env;
 use std::path::PathBuf;
+use tauri::menu::{Menu, MenuItem};
+use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
+use tauri::{AppHandle, Manager};
+use winreg::enums::HKEY_CURRENT_USER;
+use winreg::RegKey;
 
 #[derive(Debug, Serialize)]
 struct Metric {
@@ -163,7 +168,16 @@ fn get_dashboard(date: Option<String>) -> Result<DashboardPayload, String> {
     let target = date.unwrap_or_else(|| Local::now().date_naive().to_string());
     let db_path = attentionos_db_path()?;
     let conn = Connection::open(&db_path).map_err(|err| err.to_string())?;
-    let events = load_events_for_day(&conn, &target)?;
+    let settings = load_runtime_settings();
+    let events = load_events_for_day(&conn, &target)?
+        .into_iter()
+        .filter(|event| {
+            !is_excluded_app(
+                &event.process_name,
+                &settings.tracking.excluded_applications,
+            )
+        })
+        .collect::<Vec<_>>();
     Ok(build_dashboard(target, db_path, events))
 }
 
@@ -231,29 +245,185 @@ fn get_settings() -> Result<RuntimeSettingsPayload, String> {
 }
 
 #[tauri::command]
-fn save_settings(settings: RuntimeSettingsPayload) -> Result<(), String> {
+fn save_settings(app: AppHandle, settings: RuntimeSettingsPayload) -> Result<(), String> {
     let path = attentionos_settings_path()?;
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|err| err.to_string())?;
     }
     let raw = serde_json::to_string_pretty(&settings).map_err(|err| err.to_string())?;
-    std::fs::write(path, raw).map_err(|err| err.to_string())
+    std::fs::write(path, raw).map_err(|err| err.to_string())?;
+    apply_startup_setting(&app, settings.preferences.launch_on_startup)?;
+    Ok(())
+}
+
+#[tauri::command]
+fn export_data() -> Result<String, String> {
+    let db_path = attentionos_db_path()?;
+    let export_dir = attentionos_data_dir()?.join("exports");
+    std::fs::create_dir_all(&export_dir).map_err(|err| err.to_string())?;
+    let output = export_dir.join(format!(
+        "attentionos_export_{}.json",
+        Local::now().format("%Y%m%d_%H%M%S")
+    ));
+    let conn = Connection::open(db_path).map_err(|err| err.to_string())?;
+    let payload = serde_json::json!({
+        "activity_events": table_as_json(&conn, "activity_events")?,
+        "self_reports": table_as_json(&conn, "self_reports")?,
+        "interventions": table_as_json(&conn, "interventions")?,
+        "notifications": table_as_json(&conn, "notifications")?,
+    });
+    std::fs::write(
+        &output,
+        serde_json::to_string_pretty(&payload).map_err(|err| err.to_string())?,
+    )
+    .map_err(|err| err.to_string())?;
+    Ok(output.display().to_string())
+}
+
+#[tauri::command]
+fn delete_telemetry() -> Result<(), String> {
+    execute_delete(&["activity_events"])
+}
+
+#[tauri::command]
+fn delete_self_reports() -> Result<(), String> {
+    execute_delete(&["self_reports"])
+}
+
+#[tauri::command]
+fn delete_interventions() -> Result<(), String> {
+    execute_delete(&["interventions", "notifications"])
+}
+
+#[tauri::command]
+fn delete_all_data() -> Result<(), String> {
+    execute_delete(&[
+        "activity_events",
+        "self_reports",
+        "interventions",
+        "notifications",
+    ])
+}
+
+#[tauri::command]
+fn delete_model() -> Result<(), String> {
+    let model_dir = attentionos_data_dir()?.join("models");
+    if model_dir.exists() {
+        std::fs::remove_dir_all(model_dir).map_err(|err| err.to_string())?;
+    }
+    Ok(())
 }
 
 fn attentionos_db_path() -> Result<PathBuf, String> {
+    Ok(attentionos_data_dir()?.join("attentionos.db"))
+}
+
+fn attentionos_data_dir() -> Result<PathBuf, String> {
     let root = env::var_os("LOCALAPPDATA")
         .or_else(|| env::var_os("APPDATA"))
         .map(PathBuf::from)
         .ok_or_else(|| "LOCALAPPDATA/APPDATA is not available".to_string())?;
-    Ok(root.join("AttentionOS").join("attentionos.db"))
+    Ok(root.join("AttentionOS"))
 }
 
 fn attentionos_settings_path() -> Result<PathBuf, String> {
-    let root = env::var_os("LOCALAPPDATA")
-        .or_else(|| env::var_os("APPDATA"))
-        .map(PathBuf::from)
-        .ok_or_else(|| "LOCALAPPDATA/APPDATA is not available".to_string())?;
-    Ok(root.join("AttentionOS").join("settings.json"))
+    Ok(attentionos_data_dir()?.join("settings.json"))
+}
+
+fn load_runtime_settings() -> RuntimeSettingsPayload {
+    let Ok(path) = attentionos_settings_path() else {
+        return RuntimeSettingsPayload::default();
+    };
+    let Ok(raw) = std::fs::read_to_string(path) else {
+        return RuntimeSettingsPayload::default();
+    };
+    serde_json::from_str(&raw).unwrap_or_default()
+}
+
+fn is_excluded_app(process_name: &str, excluded: &[String]) -> bool {
+    let normalized = process_name.trim().to_lowercase();
+    excluded
+        .iter()
+        .map(|item| item.trim().to_lowercase())
+        .filter(|item| !item.is_empty())
+        .any(|item| normalized == item || normalized == format!("{item}.exe"))
+}
+
+fn apply_startup_setting(app: &AppHandle, enabled: bool) -> Result<(), String> {
+    let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+    let (run_key, _) = hkcu
+        .create_subkey("Software\\Microsoft\\Windows\\CurrentVersion\\Run")
+        .map_err(|err| err.to_string())?;
+    if enabled {
+        let exe = env::current_exe().map_err(|err| err.to_string())?;
+        let value = format!("\"{}\"", exe.display());
+        run_key
+            .set_value("AttentionOS", &value)
+            .map_err(|err| err.to_string())?;
+    } else {
+        let _ = run_key.delete_value("AttentionOS");
+    }
+    if let Some(window) = app.get_webview_window("main") {
+        let settings = load_runtime_settings();
+        if settings.preferences.start_minimized {
+            let _ = window.hide();
+        }
+    }
+    Ok(())
+}
+
+fn table_exists(conn: &Connection, table: &str) -> Result<bool, String> {
+    let count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?1",
+            params![table],
+            |row| row.get(0),
+        )
+        .map_err(|err| err.to_string())?;
+    Ok(count > 0)
+}
+
+fn execute_delete(tables: &[&str]) -> Result<(), String> {
+    let db_path = attentionos_db_path()?;
+    let conn = Connection::open(db_path).map_err(|err| err.to_string())?;
+    for table in tables {
+        if table_exists(&conn, table)? {
+            conn.execute(&format!("DELETE FROM {table}"), [])
+                .map_err(|err| err.to_string())?;
+        }
+    }
+    Ok(())
+}
+
+fn table_as_json(conn: &Connection, table: &str) -> Result<Vec<serde_json::Value>, String> {
+    if !table_exists(conn, table)? {
+        return Ok(Vec::new());
+    }
+    let mut stmt = conn
+        .prepare(&format!("SELECT * FROM {table}"))
+        .map_err(|err| err.to_string())?;
+    let names = stmt
+        .column_names()
+        .into_iter()
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    let rows = stmt
+        .query_map([], |row| {
+            let mut object = serde_json::Map::new();
+            for (index, name) in names.iter().enumerate() {
+                let value = row
+                    .get::<_, String>(index)
+                    .map(serde_json::Value::String)
+                    .or_else(|_| row.get::<_, i64>(index).map(serde_json::Value::from))
+                    .or_else(|_| row.get::<_, f64>(index).map(serde_json::Value::from))
+                    .unwrap_or(serde_json::Value::Null);
+                object.insert(name.clone(), value);
+            }
+            Ok(serde_json::Value::Object(object))
+        })
+        .map_err(|err| err.to_string())?;
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|err| err.to_string())
 }
 
 fn load_events_for_day(conn: &Connection, date: &str) -> Result<Vec<EventRow>, String> {
@@ -539,14 +709,69 @@ pub fn run() {
                         .build(),
                 )?;
             }
+            let handle = app.handle().clone();
+            apply_startup_setting(
+                &handle,
+                load_runtime_settings().preferences.launch_on_startup,
+            )?;
+            let show = MenuItem::with_id(app, "show", "Show AttentionOS", true, None::<&str>)?;
+            let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
+            let menu = Menu::with_items(app, &[&show, &quit])?;
+            TrayIconBuilder::with_id("attentionos")
+                .tooltip("AttentionOS")
+                .menu(&menu)
+                .show_menu_on_left_click(false)
+                .on_tray_icon_event(|tray, event| {
+                    if let TrayIconEvent::Click {
+                        button: MouseButton::Left,
+                        button_state: MouseButtonState::Up,
+                        ..
+                    } = event
+                    {
+                        if let Some(window) = tray.app_handle().get_webview_window("main") {
+                            let _ = window.show();
+                            let _ = window.set_focus();
+                        }
+                    }
+                })
+                .build(app)?;
+            if load_runtime_settings().preferences.start_minimized {
+                if let Some(window) = app.get_webview_window("main") {
+                    let _ = window.hide();
+                }
+            }
             Ok(())
+        })
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                if load_runtime_settings().preferences.minimize_to_tray {
+                    api.prevent_close();
+                    let _ = window.hide();
+                }
+            }
+        })
+        .on_menu_event(|app, event| match event.id().as_ref() {
+            "show" => {
+                if let Some(window) = app.get_webview_window("main") {
+                    let _ = window.show();
+                    let _ = window.set_focus();
+                }
+            }
+            "quit" => app.exit(0),
+            _ => {}
         })
         .invoke_handler(tauri::generate_handler![
             get_dashboard,
             get_notifications,
             mark_notification_read,
             get_settings,
-            save_settings
+            save_settings,
+            export_data,
+            delete_telemetry,
+            delete_self_reports,
+            delete_interventions,
+            delete_all_data,
+            delete_model
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

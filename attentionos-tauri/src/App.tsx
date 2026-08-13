@@ -104,6 +104,65 @@ function effectiveTheme(settings: RuntimeSettings | null) {
   return settings.preferences.theme
 }
 
+const dict = {
+  en: {
+    subtitle: 'Local-first focus analytics',
+    localOnly: 'Local only',
+    notifications: 'Notifications',
+    settings: 'Settings',
+    currentState: 'Current state',
+    timeline: 'Timeline',
+    timelineHint: '09:00-18:00 workday view from local foreground telemetry.',
+    today: 'Today',
+    noData: 'No focus data yet',
+    noDataText: 'Start tracking in AttentionOS and this timeline will fill with your real day.',
+    activityPattern: 'Activity Pattern',
+    activityHint: 'Focused vs active minutes for the selected day.',
+    topApps: 'Top Apps',
+    topAppsHint: 'Ranked by active foreground time.',
+    recentSessions: 'Recent Sessions',
+    recentHint: 'Latest foreground work blocks.',
+    time: 'Time',
+    app: 'Application',
+    duration: 'Duration',
+    task: 'Task',
+    save: 'Save settings',
+    close: 'Close',
+    exported: 'Exported to',
+    deleted: 'Deleted',
+  },
+  ru: {
+    subtitle: 'Локальная аналитика фокуса',
+    localOnly: 'Только локально',
+    notifications: 'Уведомления',
+    settings: 'Настройки',
+    currentState: 'Текущее состояние',
+    timeline: 'Таймлайн',
+    timelineHint: 'Рабочий день 09:00-18:00 по локальной телеметрии окон.',
+    today: 'Сегодня',
+    noData: 'Данных пока нет',
+    noDataText: 'Запусти отслеживание, и здесь появится реальный таймлайн дня.',
+    activityPattern: 'Паттерн активности',
+    activityHint: 'Фокус и активное время за выбранный день.',
+    topApps: 'Топ приложений',
+    topAppsHint: 'По активному времени на переднем плане.',
+    recentSessions: 'Последние сессии',
+    recentHint: 'Последние блоки работы в приложениях.',
+    time: 'Время',
+    app: 'Приложение',
+    duration: 'Длительность',
+    task: 'Задача',
+    save: 'Сохранить настройки',
+    close: 'Закрыть',
+    exported: 'Экспортировано в',
+    deleted: 'Удалено',
+  },
+} as const
+
+function language(settings: RuntimeSettings | null): 'en' | 'ru' {
+  return settings?.preferences.language === 'ru' ? 'ru' : 'en'
+}
+
 function App() {
   const [date, setDate] = useState(todayIso())
   const [dashboard, setDashboard] = useState<DashboardPayload | null>(null)
@@ -147,6 +206,7 @@ function App() {
     })
     return map
   }, [dashboard?.timeline])
+  const t = dict[language(settings)]
 
   async function markRead(id: number) {
     await invoke('mark_notification_read', { id })
@@ -158,18 +218,18 @@ function App() {
       <header className="topbar">
         <div>
           <div className="brand">AttentionOS</div>
-          <div className="subtle">Local-first focus analytics</div>
+          <div className="subtle">{t.subtitle}</div>
         </div>
         <div className="topbar-actions">
-          <span className="privacy-pill">Local only</span>
+          <span className="privacy-pill">{t.localOnly}</span>
           <button type="button" className="icon-button" onClick={() => refresh()} aria-label="Refresh">
             R
           </button>
           <button type="button" className="button ghost" onClick={() => setNotificationsOpen(true)}>
-            Notifications {unreadCount > 0 && <span className="badge">{unreadCount}</span>}
+            {t.notifications} {unreadCount > 0 && <span className="badge">{unreadCount}</span>}
           </button>
           <button type="button" className="button ghost" onClick={() => setSettingsOpen(true)}>
-            Settings
+            {t.settings}
           </button>
         </div>
       </header>
@@ -178,7 +238,7 @@ function App() {
 
       <section className="hero-grid">
         <article className="state-card">
-          <div className="eyebrow">{dashboard?.current_state.label ?? 'Current state'}</div>
+          <div className="eyebrow">{dashboard?.current_state.label ?? t.currentState}</div>
           <h1>{loading ? 'Loading' : dashboard?.current_state.value}</h1>
           <p>{dashboard?.current_state.detail ?? 'Reading local telemetry.'}</p>
           <div className="state-meta">
@@ -201,12 +261,12 @@ function App() {
       <section className="panel timeline-panel">
         <div className="panel-header">
           <div>
-            <h2>Timeline</h2>
-            <p>09:00-18:00 workday view from local foreground telemetry.</p>
+            <h2>{t.timeline}</h2>
+            <p>{t.timelineHint}</p>
           </div>
           <div className="date-nav">
             <button type="button" onClick={() => setDate(shiftDate(date, -1))}>{'<'}</button>
-            <span>{date === todayIso() ? 'Today' : formatDate(date)}</span>
+            <span>{date === todayIso() ? t.today : formatDate(date)}</span>
             <button type="button" onClick={() => setDate(shiftDate(date, 1))}>{'>'}</button>
           </div>
         </div>
@@ -255,14 +315,14 @@ function App() {
                   {formatClock(selectedSegment.start_minute)}-{formatClock(selectedSegment.end_minute)}
                 </span>
                 <span>{formatMinutes(selectedSegment.duration_minutes)}</span>
-                <span>Task: {selectedSegment.task ?? 'Unassigned'}</span>
+                <span>{t.task}: {selectedSegment.task ?? 'Unassigned'}</span>
               </div>
             )}
           </div>
         ) : (
           <div className="empty-state">
-            <h3>No focus data yet</h3>
-            <p>Start tracking in AttentionOS and this timeline will fill with your real day.</p>
+            <h3>{t.noData}</h3>
+            <p>{t.noDataText}</p>
           </div>
         )}
       </section>
@@ -271,8 +331,8 @@ function App() {
         <article className="panel">
           <div className="panel-header">
             <div>
-              <h2>Activity Pattern</h2>
-              <p>Focused vs active minutes for the selected day.</p>
+              <h2>{t.activityPattern}</h2>
+              <p>{t.activityHint}</p>
             </div>
           </div>
           <div className="bar-comparison">
@@ -285,8 +345,8 @@ function App() {
         <article className="panel">
           <div className="panel-header">
             <div>
-              <h2>Top Apps</h2>
-              <p>Ranked by active foreground time.</p>
+              <h2>{t.topApps}</h2>
+              <p>{t.topAppsHint}</p>
             </div>
           </div>
           <div className="app-list">
@@ -309,17 +369,17 @@ function App() {
       <section className="panel">
         <div className="panel-header">
           <div>
-            <h2>Recent Sessions</h2>
-            <p>Latest foreground work blocks.</p>
+            <h2>{t.recentSessions}</h2>
+            <p>{t.recentHint}</p>
           </div>
           <span className="muted">SQLite: {dashboard?.db_path}</span>
         </div>
         <div className="sessions-table">
           <div className="table-head">
-            <span>Time</span>
-            <span>Application</span>
-            <span>Duration</span>
-            <span>Task</span>
+            <span>{t.time}</span>
+            <span>{t.app}</span>
+            <span>{t.duration}</span>
+            <span>{t.task}</span>
           </div>
           {(dashboard?.recent_sessions ?? []).map((session) => (
             <div className="table-row" key={`${session.time}-${session.application}-${session.duration_minutes}`}>
@@ -367,6 +427,7 @@ function App() {
           dashboard={dashboard}
           settings={settings}
           unreadCount={unreadCount}
+          ui={t}
           onClose={() => setSettingsOpen(false)}
           onSave={async (next) => {
             await invoke('save_settings', { settings: next })
@@ -398,18 +459,21 @@ function SettingsModal({
   dashboard,
   settings,
   unreadCount,
+  ui,
   onClose,
   onSave,
 }: {
   dashboard: DashboardPayload | null
   settings: RuntimeSettings | null
   unreadCount: number
+  ui: typeof dict.en | typeof dict.ru
   onClose: () => void
   onSave: (settings: RuntimeSettings) => Promise<void>
 }) {
   const [tab, setTab] = useState('general')
   const [draft, setDraft] = useState<RuntimeSettings | null>(settings)
   const [excludedInput, setExcludedInput] = useState('')
+  const [status, setStatus] = useState('')
 
   useEffect(() => setDraft(settings), [settings])
   if (!draft) return null
@@ -457,6 +521,7 @@ function SettingsModal({
               <Checkbox label="Launch on startup" checked={draft.preferences.launch_on_startup} onChange={(value) => setPreference('launch_on_startup', value)} />
               <Checkbox label="Minimize to tray" checked={draft.preferences.minimize_to_tray} onChange={(value) => setPreference('minimize_to_tray', value)} />
               <Checkbox label="Start minimized" checked={draft.preferences.start_minimized} onChange={(value) => setPreference('start_minimized', value)} />
+              <p className="settings-note">Startup and tray behavior are applied by this Tauri app after Save.</p>
             </div>
           )}
 
@@ -470,6 +535,7 @@ function SettingsModal({
               <div className="field full">
                 <label>Excluded applications</label>
                 <div className="excluded-list">
+                  {draft.tracking.excluded_applications.length === 0 && <span className="empty-chip">No excluded apps</span>}
                   {draft.tracking.excluded_applications.map((item) => (
                     <button type="button" key={item} onClick={() => setTracking('excluded_applications', draft.tracking.excluded_applications.filter((entry) => entry !== item))}>
                       {item} x
@@ -488,6 +554,7 @@ function SettingsModal({
                   </button>
                 </div>
               </div>
+              <p className="settings-note">Excluded apps are applied to this dashboard immediately after Save. The Python collector applies tracking toggles when tracking restarts.</p>
             </div>
           )}
 
@@ -510,6 +577,15 @@ function SettingsModal({
               <SettingRow label="Typed text" value="Never recorded" />
               <SettingRow label="Screenshots" value="Never recorded" />
               <SettingRow label="Events loaded" value={(dashboard?.event_count ?? 0).toString()} />
+              <div className="danger-grid">
+                <ActionButton label="Export data" command="export_data" onDone={(message) => setStatus(`${ui.exported}: ${message}`)} />
+                <ActionButton label="Delete telemetry" command="delete_telemetry" danger onDone={() => setStatus(`${ui.deleted}: telemetry`)} />
+                <ActionButton label="Delete self reports" command="delete_self_reports" danger onDone={() => setStatus(`${ui.deleted}: self reports`)} />
+                <ActionButton label="Delete interventions" command="delete_interventions" danger onDone={() => setStatus(`${ui.deleted}: interventions`)} />
+                <ActionButton label="Delete model" command="delete_model" danger onDone={() => setStatus(`${ui.deleted}: model`)} />
+                <ActionButton label="Delete all local data" command="delete_all_data" danger onDone={() => setStatus(`${ui.deleted}: all local data`)} />
+              </div>
+              {status && <p className="settings-status">{status}</p>}
             </div>
           )}
 
@@ -523,11 +599,27 @@ function SettingsModal({
         </div>
 
         <div className="settings-actions">
-          <button type="button" className="button" onClick={onClose}>Close</button>
-          <button type="button" className="button primary" onClick={() => onSave(draft)}>Save settings</button>
+          <button type="button" className="button" onClick={onClose}>{ui.close}</button>
+          <button type="button" className="button primary" onClick={() => onSave(draft)}>{ui.save}</button>
         </div>
       </section>
     </aside>
+  )
+}
+
+function ActionButton({ label, command, danger, onDone }: { label: string; command: string; danger?: boolean; onDone: (message: string) => void }) {
+  return (
+    <button
+      type="button"
+      className={`button ${danger ? 'danger' : ''}`}
+      onClick={async () => {
+        if (danger && !window.confirm(`${label}?`)) return
+        const result = await invoke<string | null>(command)
+        onDone(result ?? '')
+      }}
+    >
+      {label}
+    </button>
   )
 }
 

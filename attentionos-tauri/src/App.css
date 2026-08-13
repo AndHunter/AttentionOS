@@ -495,6 +495,15 @@
   color: white;
 }
 
+.button.danger {
+  border-color: color-mix(in srgb, var(--danger) 45%, var(--border));
+  color: var(--danger);
+}
+
+.button.danger:hover {
+  background: color-mix(in srgb, var(--danger) 9%, var(--surface));
+}
+
 .field,
 .check-row {
   display: grid;
@@ -545,7 +554,8 @@
 }
 
 .excluded-list button,
-.inline-input button {
+.inline-input button,
+.empty-chip {
   border: 1px solid var(--border);
   border-radius: 999px;
   background: var(--surface-secondary);
@@ -554,10 +564,33 @@
   cursor: pointer;
 }
 
+.empty-chip {
+  color: var(--muted);
+}
+
 .inline-input {
   display: grid;
   grid-template-columns: 1fr auto;
   gap: 8px;
+}
+
+.settings-note,
+.settings-status {
+  margin: 4px 0 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.settings-status {
+  color: var(--accent);
+  overflow-wrap: anywhere;
+}
+
+.danger-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding-top: 8px;
 }
 
 .setting-row {
