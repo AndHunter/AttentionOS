@@ -3,7 +3,8 @@
     "title": "AttentionOS",
     "local_only": "Local only",
     "settings": "Settings",
-    "diagnostics": "Developer diagnostics"
+    "diagnostics": "Developer diagnostics",
+    "error_title": "AttentionOS"
   },
   "dashboard": {
     "title": "AttentionOS",
@@ -12,13 +13,29 @@
     "activity_empty": "Switching trend appears after multiple sessions.",
     "top_apps": "Top apps",
     "recent_sessions": "Recent sessions",
-    "view_all": "View all"
+    "current_state_eyebrow": "Current state",
+    "sessions_empty": "Sessions will appear here after tracking starts.",
+    "daily_timeline": "Daily Timeline",
+    "workday_range": "09:00 - 18:00 workday",
+    "timeline_empty_title": "No focus data yet",
+    "timeline_empty_body": "Start tracking and AttentionOS will build your first daily timeline.",
+    "tooltip_task": "Task: {task}",
+    "date_today_short": "Today, {date}",
+    "current_state_no_data": "No data yet",
+    "current_state_no_data_detail": "Start tracking to build today's baseline.",
+    "current_state_best_focus": "Best focus block",
+    "current_state_best_focus_detail": "Minutes, longest focus block.",
+    "current_state_active": "Active",
+    "current_state_active_detail": "No focus block yet.",
+    "current_state_idle": "Idle",
+    "current_state_idle_label": "Quiet day",
+    "current_state_idle_detail": "No active sessions recorded yet."
   },
   "tracking": {
     "current_task": "Current task",
     "start": "Start tracking",
     "stop": "Stop",
-    "check_in": "Check in",
+    "check_in": "Rate session",
     "status": {
       "active": "Tracking",
       "stopped": "Stopped"
@@ -33,7 +50,42 @@
     "performance": "Estimated performance",
     "decline_risk": "Decline risk",
     "learning": "Learning",
-    "not_enough_data": "Not enough data"
+    "not_enough_data": "Not enough data",
+    "avg_session": "Avg session"
+  },
+  "table": {
+    "time": "Time",
+    "application": "Application",
+    "duration": "Duration",
+    "task": "Task",
+    "no_task": "None"
+  },
+  "units": {
+    "blocks": {
+      "one": "{count} block",
+      "few": "{count} blocks",
+      "many": "{count} blocks",
+      "other": "{count} blocks"
+    },
+    "events": {
+      "one": "{count} event",
+      "few": "{count} events",
+      "many": "{count} events",
+      "other": "{count} events"
+    },
+    "switches": {
+      "one": "{count} switch",
+      "few": "{count} switches",
+      "many": "{count} switches",
+      "other": "{count} switches"
+    }
+  },
+  "duration": {
+    "zero": "0 min",
+    "sec": "{count} sec",
+    "min": "{count} min",
+    "hour": "{count} h",
+    "hour_min": "{hours} h {minutes} min"
   },
   "self_report": {
     "title": "How was that session?",
@@ -56,10 +108,10 @@
     "theme": "Theme",
     "system": "System",
     "english": "English",
-    "russian": "Russian",
+    "russian": "Русский",
     "light": "Light",
     "dark": "Dark",
-    "apply_restart": "Some changes apply after restart.",
+    "apply_restart": "Changes are applied after saving.",
     "launch_on_startup": "Launch on Windows startup",
     "minimize_to_tray": "Minimize to system tray",
     "start_minimized": "Start minimized",
@@ -91,6 +143,41 @@
     "train": "Train / Retrain",
     "reset_model": "Reset model",
     "save": "Save settings",
-    "close": "Close"
+    "close": "Close",
+    "feature_unavailable": "This feature is not available yet.",
+    "training_unavailable": "Training becomes available after enough self reports are collected."
+  },
+  "dialogs": {
+    "report_save_error": "Could not save report: {error}",
+    "export_success": "Exported: {path}",
+    "delete_telemetry_confirm": "Delete telemetry data?",
+    "delete_reports_confirm": "Delete self-reports?",
+    "delete_model_confirm": "Delete the trained model?",
+    "delete_all_confirm": "Delete all AttentionOS data?",
+    "startup_error": "Could not update Windows startup setting."
+  },
+  "diagnostics": {
+    "title": "Developer diagnostics",
+    "events": "Events",
+    "hooks": "Hooks",
+    "keys": "Keys",
+    "mouse": "Mouse",
+    "idle": "Idle",
+    "sqlite": "SQLite",
+    "on": "on",
+    "off": "off",
+    "seconds": "{count}s"
+  },
+  "tasks": {
+    "Coding": "Coding",
+    "ML": "ML",
+    "Math": "Math",
+    "English": "English",
+    "Rest": "Rest",
+    "Meeting": "Meeting",
+    "Admin": "Admin",
+    "Other": "Other",
+    "Machine Learning": "Machine Learning",
+    "Writing": "Writing"
   }
 }

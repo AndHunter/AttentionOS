@@ -35,7 +35,7 @@ def test_dashboard_snapshot_uses_existing_metrics(sample_events) -> None:
 
 def test_current_state_empty_is_not_fake_score() -> None:
     state = compute_current_state(DailySummary())
-    assert state.value == "—"
+    assert state.value == "-"
     assert state.label == "No data yet"
 
 

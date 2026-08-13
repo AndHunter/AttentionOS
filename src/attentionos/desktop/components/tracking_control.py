@@ -42,7 +42,7 @@ class TrackingControl(Card):
         eyebrow.columnconfigure(0, weight=1)
         tk.Label(
             eyebrow,
-            text="CURRENT STATE",
+            text=translator.t("dashboard.current_state_eyebrow").upper(),
             bg=COLORS.surface,
             fg=COLORS.text_secondary,
             font=TYPOGRAPHY.caption_semibold,

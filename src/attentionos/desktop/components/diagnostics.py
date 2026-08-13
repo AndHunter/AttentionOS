@@ -5,23 +5,25 @@ from __future__ import annotations
 import tkinter as tk
 
 from attentionos.desktop.theme import COLORS, SPACING, TYPOGRAPHY
+from attentionos.localization import Translator
 
 
 class DiagnosticsDrawer(tk.Toplevel):
     """Small diagnostics window for system telemetry details."""
 
-    def __init__(self, master: tk.Misc, db_path: str) -> None:
+    def __init__(self, master: tk.Misc, db_path: str, translator: Translator) -> None:
         super().__init__(master)
-        self.title("Developer diagnostics")
+        self.translator = translator
+        self.title(translator.t("diagnostics.title"))
         self.configure(bg=COLORS.background)
         self.resizable(False, False)
         self.vars = {
-            "Events": tk.StringVar(value="0"),
-            "Hooks": tk.StringVar(value="off"),
-            "Keys": tk.StringVar(value="0"),
-            "Mouse": tk.StringVar(value="0"),
-            "Idle": tk.StringVar(value="0s"),
-            "SQLite": tk.StringVar(value=db_path),
+            "diagnostics.events": tk.StringVar(value="0"),
+            "diagnostics.hooks": tk.StringVar(value=translator.t("diagnostics.off")),
+            "diagnostics.keys": tk.StringVar(value="0"),
+            "diagnostics.mouse": tk.StringVar(value="0"),
+            "diagnostics.idle": tk.StringVar(value=translator.t("diagnostics.seconds", count=0)),
+            "diagnostics.sqlite": tk.StringVar(value=db_path),
         }
         shell = tk.Frame(
             self,
@@ -32,7 +34,7 @@ class DiagnosticsDrawer(tk.Toplevel):
         shell.pack(fill="both", expand=True, padx=SPACING.lg, pady=SPACING.lg)
         tk.Label(
             shell,
-            text="Developer diagnostics",
+            text=translator.t("diagnostics.title"),
             bg=COLORS.surface,
             fg=COLORS.text,
             font=TYPOGRAPHY.section,
@@ -40,7 +42,7 @@ class DiagnosticsDrawer(tk.Toplevel):
         for row, (label, value) in enumerate(self.vars.items(), 1):
             tk.Label(
                 shell,
-                text=label,
+                text=translator.t(label),
                 bg=COLORS.surface,
                 fg=COLORS.text_secondary,
                 font=TYPOGRAPHY.caption_semibold,
@@ -56,8 +58,13 @@ class DiagnosticsDrawer(tk.Toplevel):
             ).grid(row=row, column=1, sticky="w", padx=(0, SPACING.lg), pady=(0, SPACING.sm))
 
     def set_stats(self, stats: dict[str, float | int]) -> None:
-        self.vars["Events"].set(str(stats.get("total_events", 0)))
-        self.vars["Hooks"].set("on" if stats.get("input_hooks_running") else "off")
-        self.vars["Keys"].set(str(stats.get("last_keyboard_events", 0)))
-        self.vars["Mouse"].set(str(stats.get("last_mouse_events", 0)))
-        self.vars["Idle"].set(f"{float(stats.get('last_idle_seconds', 0)):.0f}s")
+        self.vars["diagnostics.events"].set(str(stats.get("total_events", 0)))
+        self.vars["diagnostics.hooks"].set(
+            self.translator.t("diagnostics.on")
+            if stats.get("input_hooks_running")
+            else self.translator.t("diagnostics.off")
+        )
+        self.vars["diagnostics.keys"].set(str(stats.get("last_keyboard_events", 0)))
+        self.vars["diagnostics.mouse"].set(str(stats.get("last_mouse_events", 0)))
+        idle = int(round(float(stats.get("last_idle_seconds", 0))))
+        self.vars["diagnostics.idle"].set(self.translator.t("diagnostics.seconds", count=idle))

@@ -54,11 +54,16 @@ class AttentionOSDesktopApp(tk.Tk):
         self.collector_thread: threading.Thread | None = None
         self.collector_error: str | None = None
         self.diagnostics: DiagnosticsDrawer | None = None
-        self.task_var = tk.StringVar(value="None")
+        self.settings_window: SettingsWindow | None = None
+        self.self_report_window: SelfReportDialog | None = None
+        self.no_task_label = self.translator.t("table.no_task")
+        self.task_display_to_value: dict[str, str] = {}
+        self.task_var = tk.StringVar(value=self.no_task_label)
 
         self._configure_styles()
         self.dashboard: DashboardView | None = None
         self._build_dashboard()
+        self._restore_task_label()
         if self.runtime_settings.preferences.start_minimized:
             self.after(250, self.iconify)
         self._refresh_dashboard()
@@ -70,10 +75,11 @@ class AttentionOSDesktopApp(tk.Tk):
             self.dashboard.destroy()
         self.configure(bg=COLORS.background)
         self.title(self.translator.t("app.title"))
+        task_labels = self._task_labels()
         self.dashboard = DashboardView(
             self,
             task_var=self.task_var,
-            task_labels=["None", *self.config.self_report.default_task_labels],
+            task_labels=task_labels,
             callbacks={
                 "task_change": self._sync_task_label,
                 "start": self._start_collector,
@@ -86,6 +92,15 @@ class AttentionOSDesktopApp(tk.Tk):
             translator=self.translator,
         )
         self.dashboard.pack(fill="both", expand=True)
+
+    def _task_labels(self) -> list[str]:
+        self.task_display_to_value = {self.no_task_label: "None"}
+        labels = [self.no_task_label]
+        for label in self.config.self_report.default_task_labels:
+            display = self.translator.t(f"tasks.{label}")
+            self.task_display_to_value[display] = label
+            labels.append(display)
+        return labels
 
     def _effective_theme(self) -> str:
         theme = self.runtime_settings.preferences.theme
@@ -168,13 +183,31 @@ class AttentionOSDesktopApp(tk.Tk):
     def _collector_failed(self) -> None:
         self._update_tracking_status()
         if self.collector_error:
-            messagebox.showerror("AttentionOS", self.collector_error)
+            messagebox.showerror(self.translator.t("app.error_title"), self.collector_error)
 
     def _sync_task_label(self) -> None:
         label = self.task_var.get()
-        normalized = None if label == "None" else label
+        value = self.task_display_to_value.get(label, label)
+        normalized = None if value == "None" else value
+        self.runtime_settings.preferences.current_task_label = normalized or "None"
+        self.settings_store.save(self.runtime_settings)
         if self.collector is not None:
             self.collector.set_task_label(normalized)
+
+    def _restore_task_label(self) -> None:
+        saved_task = self.runtime_settings.preferences.current_task_label
+        if saved_task == "None":
+            self.task_var.set(self.no_task_label)
+            return
+        display = next(
+            (
+                display
+                for display, value in self.task_display_to_value.items()
+                if value == saved_task
+            ),
+            saved_task,
+        )
+        self.task_var.set(display)
 
     def _previous_day(self) -> None:
         from datetime import timedelta
@@ -190,7 +223,11 @@ class AttentionOSDesktopApp(tk.Tk):
             self._refresh_dashboard()
 
     def _open_self_report(self) -> None:
-        SelfReportDialog(self, self._save_self_report, self.translator)
+        if self.self_report_window is not None and self.self_report_window.winfo_exists():
+            self.self_report_window.lift()
+            self.self_report_window.focus_force()
+            return
+        self.self_report_window = SelfReportDialog(self, self._save_self_report, self.translator)
 
     def _save_self_report(
         self,
@@ -201,7 +238,12 @@ class AttentionOSDesktopApp(tk.Tk):
     ) -> None:
         report = SelfReport(
             timestamp=datetime.now(tz=UTC),
-            task_name=None if self.task_var.get() == "None" else self.task_var.get(),
+            task_name=(
+                None
+                if self.task_display_to_value.get(self.task_var.get(), self.task_var.get())
+                == "None"
+                else self.task_display_to_value.get(self.task_var.get(), self.task_var.get())
+            ),
             telemetry_window_start=datetime.now(tz=UTC) - timedelta(minutes=30),
             telemetry_window_end=datetime.now(tz=UTC),
             perceived_effectiveness=effectiveness,
@@ -212,13 +254,20 @@ class AttentionOSDesktopApp(tk.Tk):
         try:
             insert_self_report(report, self.config.db_path)
         except Exception as exc:
-            messagebox.showerror("AttentionOS", f"Could not save report: {exc}")
+            messagebox.showerror(
+                self.translator.t("app.error_title"),
+                self.translator.t("dialogs.report_save_error", error=exc),
+            )
             return
         self._refresh_dashboard()
 
     def _open_settings(self) -> None:
+        if self.settings_window is not None and self.settings_window.winfo_exists():
+            self.settings_window.lift()
+            self.settings_window.focus_force()
+            return
         counts = self._model_counts()
-        SettingsWindow(
+        self.settings_window = SettingsWindow(
             self,
             self.runtime_settings,
             self.translator,
@@ -245,6 +294,9 @@ class AttentionOSDesktopApp(tk.Tk):
             self.collector.update_runtime_settings(settings)
         self.translator.set_language(settings.preferences.language)
         apply_color_theme(self._effective_theme())
+        self.no_task_label = self.translator.t("table.no_task")
+        self._task_labels()
+        self._restore_task_label()
         self._configure_styles()
         self._build_dashboard()
         self._refresh_dashboard()
@@ -289,31 +341,34 @@ class AttentionOSDesktopApp(tk.Tk):
         if not output:
             return
         paths = export_data(output, self.config.db_path, "json")
-        messagebox.showinfo("AttentionOS", f"Exported: {paths[0]}")
+        messagebox.showinfo(
+            self.translator.t("app.error_title"),
+            self.translator.t("dialogs.export_success", path=paths[0]),
+        )
 
     def _confirm(self, message: str) -> bool:
-        return messagebox.askyesno("AttentionOS", message)
+        return messagebox.askyesno(self.translator.t("app.error_title"), message)
 
     def _delete_telemetry(self) -> None:
-        if not self._confirm(self.translator.t("settings.delete_telemetry")):
+        if not self._confirm(self.translator.t("dialogs.delete_telemetry_confirm")):
             return
         with get_session(self.config.db_path) as session:
             session.exec(delete(ActivityEvent))
         self._refresh_dashboard()
 
     def _delete_reports(self) -> None:
-        if not self._confirm(self.translator.t("settings.delete_self_reports")):
+        if not self._confirm(self.translator.t("dialogs.delete_reports_confirm")):
             return
         with get_session(self.config.db_path) as session:
             session.exec(delete(SelfReport))
 
     def _delete_model(self) -> None:
         model_dir = self.config.data_dir / "models"
-        if model_dir.exists() and self._confirm(self.translator.t("settings.delete_model")):
+        if model_dir.exists() and self._confirm(self.translator.t("dialogs.delete_model_confirm")):
             shutil.rmtree(model_dir)
 
     def _delete_all_data(self) -> None:
-        if not self._confirm(self.translator.t("settings.delete_all")):
+        if not self._confirm(self.translator.t("dialogs.delete_all_confirm")):
             return
         self._stop_collector()
         self._delete_telemetry()
@@ -324,7 +379,7 @@ class AttentionOSDesktopApp(tk.Tk):
         if self.diagnostics is not None and self.diagnostics.winfo_exists():
             self.diagnostics.lift()
             return
-        self.diagnostics = DiagnosticsDrawer(self, str(self.config.db_path))
+        self.diagnostics = DiagnosticsDrawer(self, str(self.config.db_path), self.translator)
         self._update_diagnostics()
 
     def _tick(self) -> None:

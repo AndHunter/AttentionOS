@@ -3,7 +3,8 @@
     "title": "AttentionOS",
     "local_only": "Только локально",
     "settings": "Настройки",
-    "diagnostics": "Диагностика разработчика"
+    "diagnostics": "Диагностика разработчика",
+    "error_title": "AttentionOS"
   },
   "dashboard": {
     "title": "AttentionOS",
@@ -12,7 +13,23 @@
     "activity_empty": "Тренд переключений появится после нескольких сессий.",
     "top_apps": "Топ приложений",
     "recent_sessions": "Последние сессии",
-    "view_all": "Показать все"
+    "current_state_eyebrow": "Текущее состояние",
+    "sessions_empty": "Сессии появятся здесь после запуска отслеживания.",
+    "daily_timeline": "Таймлайн дня",
+    "workday_range": "Рабочий день 09:00 - 18:00",
+    "timeline_empty_title": "Пока нет данных",
+    "timeline_empty_body": "Начните отслеживание, чтобы AttentionOS построил статистику дня.",
+    "tooltip_task": "Задача: {task}",
+    "date_today_short": "Сегодня, {date}",
+    "current_state_no_data": "Пока нет данных",
+    "current_state_no_data_detail": "Начните отслеживание, чтобы построить базовую статистику дня.",
+    "current_state_best_focus": "Лучший фокус-блок",
+    "current_state_best_focus_detail": "Минуты, самый длинный фокус-блок.",
+    "current_state_active": "Активно",
+    "current_state_active_detail": "Фокус-блоков пока нет.",
+    "current_state_idle": "Нет активности",
+    "current_state_idle_label": "Спокойный день",
+    "current_state_idle_detail": "Активные сессии сегодня пока не записаны."
   },
   "tracking": {
     "current_task": "Текущая задача",
@@ -33,7 +50,42 @@
     "performance": "Оценка эффективности",
     "decline_risk": "Риск спада",
     "learning": "Обучение",
-    "not_enough_data": "Недостаточно данных"
+    "not_enough_data": "Недостаточно данных",
+    "avg_session": "Средняя сессия"
+  },
+  "table": {
+    "time": "Время",
+    "application": "Приложение",
+    "duration": "Длительность",
+    "task": "Задача",
+    "no_task": "Нет"
+  },
+  "units": {
+    "blocks": {
+      "one": "{count} блок",
+      "few": "{count} блока",
+      "many": "{count} блоков",
+      "other": "{count} блоков"
+    },
+    "events": {
+      "one": "{count} событие",
+      "few": "{count} события",
+      "many": "{count} событий",
+      "other": "{count} событий"
+    },
+    "switches": {
+      "one": "{count} переключение",
+      "few": "{count} переключения",
+      "many": "{count} переключений",
+      "other": "{count} переключений"
+    }
+  },
+  "duration": {
+    "zero": "0 мин.",
+    "sec": "{count} сек.",
+    "min": "{count} мин.",
+    "hour": "{count} ч",
+    "hour_min": "{hours} ч {minutes} мин."
   },
   "self_report": {
     "title": "Как прошла сессия?",
@@ -43,7 +95,7 @@
     "difficulty": "Сложность",
     "note": "Заметка",
     "skip": "Пропустить",
-    "save": "Сохранить"
+    "save": "Сохранить отчёт"
   },
   "settings": {
     "title": "Настройки",
@@ -54,15 +106,15 @@
     "model": "Модель",
     "language": "Язык",
     "theme": "Тема",
-    "system": "Системный",
+    "system": "Системная",
     "english": "English",
     "russian": "Русский",
     "light": "Светлая",
     "dark": "Тёмная",
-    "apply_restart": "Некоторые изменения применятся после перезапуска.",
+    "apply_restart": "Изменения применяются после сохранения.",
     "launch_on_startup": "Запускать вместе с Windows",
     "minimize_to_tray": "Сворачивать в системный трей",
-    "start_minimized": "Запускать свернутым",
+    "start_minimized": "Запускать свёрнутым",
     "idle_threshold": "Порог бездействия, минут",
     "track_active_window": "Отслеживать активное окно",
     "track_window_titles": "Отслеживать заголовки окон",
@@ -71,26 +123,61 @@
     "excluded_apps": "Исключённые приложения",
     "add_app": "Добавить",
     "remove_selected": "Удалить выбранное",
-    "break_recommendations": "Рекомендации перерыва",
+    "break_recommendations": "Рекомендации перерывов",
     "performance_warnings": "Предупреждения об эффективности",
     "notification_interval": "Минимальный интервал",
     "dnd_start": "Не беспокоить с",
     "dnd_end": "Не беспокоить до",
-    "stored_locally": "Вся telemetry хранится локально на этом устройстве.",
-    "database_path": "SQLite база",
+    "stored_locally": "Вся телеметрия хранится локально на этом устройстве.",
+    "database_path": "База SQLite",
     "export_data": "Экспорт данных",
-    "delete_telemetry": "Удалить telemetry",
-    "delete_self_reports": "Удалить self-reports",
+    "delete_telemetry": "Удалить телеметрию",
+    "delete_self_reports": "Удалить самоотчёты",
     "delete_model": "Удалить модель",
     "delete_all": "Удалить все данные AttentionOS",
     "never_records": "AttentionOS никогда не записывает введённый текст, скриншоты, буфер обмена, микрофон или камеру.",
     "personal_model": "Персональная модель",
     "collecting_data": "Сбор данных",
-    "telemetry_windows": "Telemetry окна",
-    "self_reports": "Self-reports",
+    "telemetry_windows": "Окна телеметрии",
+    "self_reports": "Самоотчёты",
     "train": "Обучить / переобучить",
     "reset_model": "Сбросить модель",
     "save": "Сохранить настройки",
-    "close": "Закрыть"
+    "close": "Закрыть",
+    "feature_unavailable": "Функция пока недоступна.",
+    "training_unavailable": "Обучение станет доступно после накопления самоотчётов."
+  },
+  "dialogs": {
+    "report_save_error": "Не удалось сохранить отчёт: {error}",
+    "export_success": "Экспортировано: {path}",
+    "delete_telemetry_confirm": "Удалить телеметрию?",
+    "delete_reports_confirm": "Удалить самоотчёты?",
+    "delete_model_confirm": "Удалить обученную модель?",
+    "delete_all_confirm": "Удалить все данные AttentionOS?",
+    "startup_error": "Не удалось обновить автозапуск Windows."
+  },
+  "diagnostics": {
+    "title": "Диагностика разработчика",
+    "events": "События",
+    "hooks": "Хуки",
+    "keys": "Клавиши",
+    "mouse": "Мышь",
+    "idle": "Бездействие",
+    "sqlite": "SQLite",
+    "on": "вкл.",
+    "off": "выкл.",
+    "seconds": "{count} с"
+  },
+  "tasks": {
+    "Coding": "Кодинг",
+    "ML": "Машинное обучение",
+    "Math": "Математика",
+    "English": "Английский",
+    "Rest": "Отдых",
+    "Meeting": "Встреча",
+    "Admin": "Админка",
+    "Other": "Другое",
+    "Machine Learning": "Машинное обучение",
+    "Writing": "Письмо"
   }
 }

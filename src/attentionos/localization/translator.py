@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import json
 import locale
+import logging
 from importlib import resources
 from typing import Literal
 
 Language = Literal["system", "en", "ru"]
+logger = logging.getLogger(__name__)
 
 
 def detect_system_language() -> str:
@@ -33,10 +35,30 @@ class Translator:
         self._strings = self._load(self.language)
 
     def t(self, key: str, **values: object) -> str:
-        text = self._lookup(self._strings, key) or self._lookup(self._fallback, key) or key
+        text = self._lookup(self._strings, key)
+        if text is None:
+            fallback = self._lookup(self._fallback, key)
+            if fallback is None:
+                logger.warning("Missing translation key: %s", key)
+                text = key
+            else:
+                text = fallback
         if values:
             return text.format(**values)
         return text
+
+    def plural(self, base_key: str, count: int) -> str:
+        form = "one" if count == 1 else "other"
+        if self.language == "ru":
+            mod10 = count % 10
+            mod100 = count % 100
+            if mod10 == 1 and mod100 != 11:
+                form = "one"
+            elif 2 <= mod10 <= 4 and not 12 <= mod100 <= 14:
+                form = "few"
+            else:
+                form = "many"
+        return self.t(f"{base_key}.{form}", count=count)
 
     @staticmethod
     def _load(language: str) -> dict[str, object]:

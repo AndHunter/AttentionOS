@@ -5,8 +5,9 @@ from __future__ import annotations
 import tkinter as tk
 
 from attentionos.desktop.components.base import Card, draw_rounded_rect
+from attentionos.desktop.formatting import format_duration
 from attentionos.desktop.theme import COLORS, RADIUS, SPACING, TYPOGRAPHY
-from attentionos.desktop.view_model import TopApp, format_duration
+from attentionos.desktop.view_model import TopApp
 from attentionos.localization import Translator
 
 
@@ -61,7 +62,7 @@ class TopAppsList(Card):
             ).grid(row=0, column=1, sticky="w")
             tk.Label(
                 row,
-                text=f"{format_duration(app.seconds)}  {app.percent:.0f}%",
+                text=f"{format_duration(app.seconds, self.translator)}  {app.percent:.0f}%",
                 bg=COLORS.surface,
                 fg=COLORS.text_secondary,
                 font=TYPOGRAPHY.caption,

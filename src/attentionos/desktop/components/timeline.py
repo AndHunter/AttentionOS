@@ -7,8 +7,10 @@ from collections.abc import Callable
 from datetime import datetime
 
 from attentionos.desktop.components.base import Card, TextButton, draw_rounded_rect
+from attentionos.desktop.formatting import format_duration, format_short_date
 from attentionos.desktop.theme import APP_COLORS, COLORS, RADIUS, SPACING, TYPOGRAPHY
-from attentionos.desktop.view_model import DashboardSnapshot, clean_app_name, format_duration
+from attentionos.desktop.view_model import DashboardSnapshot, clean_app_name
+from attentionos.localization import Translator
 
 
 class Timeline(Card):
@@ -19,8 +21,10 @@ class Timeline(Card):
         master: tk.Misc,
         on_previous_day: Callable[[], None],
         on_next_day: Callable[[], None],
+        translator: Translator,
     ) -> None:
         super().__init__(master, padding=SPACING.xl, variant="hero")
+        self.translator = translator
         self.snapshot: DashboardSnapshot | None = None
         self._segments: list[tuple[int, object]] = []
         self.date_var = tk.StringVar(value="Today")
@@ -39,7 +43,7 @@ class Timeline(Card):
         header.columnconfigure(0, weight=1)
         tk.Label(
             header,
-            text="Daily Timeline",
+            text=translator.t("dashboard.daily_timeline"),
             bg=COLORS.surface,
             fg=COLORS.text,
             font=TYPOGRAPHY.section,
@@ -71,8 +75,12 @@ class Timeline(Card):
 
     def set_snapshot(self, snapshot: DashboardSnapshot) -> None:
         self.snapshot = snapshot
-        label = snapshot.target_date.strftime("%b %d")
-        self.date_var.set(f"Today, {label}" if snapshot.is_today else label)
+        label = format_short_date(snapshot.target_date, self.translator)
+        self.date_var.set(
+            self.translator.t("dashboard.date_today_short", date=label)
+            if snapshot.is_today
+            else label
+        )
         self.draw()
 
     def draw(self) -> None:
@@ -89,7 +97,7 @@ class Timeline(Card):
         self.canvas.create_text(
             left,
             22,
-            text="09:00 - 18:00 workday",
+            text=self.translator.t("dashboard.workday_range"),
             anchor="w",
             fill=COLORS.text_secondary,
             font=tk_font,
@@ -170,14 +178,14 @@ class Timeline(Card):
         self.canvas.create_text(
             width / 2,
             top + height / 2 - 8,
-            text="No focus data yet",
+            text=self.translator.t("dashboard.timeline_empty_title"),
             fill=COLORS.text,
             font=TYPOGRAPHY.section,
         )
         self.canvas.create_text(
             width / 2,
             top + height / 2 + 16,
-            text="Start tracking and AttentionOS will build your first daily timeline.",
+            text=self.translator.t("dashboard.timeline_empty_body"),
             fill=COLORS.text_secondary,
             font=TYPOGRAPHY.caption,
         )
@@ -192,10 +200,13 @@ class Timeline(Card):
                 text = (
                     f"{session.ts_start.strftime('%H:%M')}-{session.ts_end.strftime('%H:%M')}\n"
                     f"{clean_app_name(session.process_name)}\n"
-                    f"{format_duration(session.duration_seconds)}"
+                    f"{format_duration(session.duration_seconds, self.translator)}"
                 )
                 if session.task_label:
-                    text += f"\nTask: {session.task_label}"
+                    text += "\n" + self.translator.t(
+                        "dashboard.tooltip_task",
+                        task=session.task_label,
+                    )
                 self.tooltip.configure(text=text)
                 self.tooltip.place(
                     x=event.x_root - self.winfo_rootx() + 12,

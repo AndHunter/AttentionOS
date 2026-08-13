@@ -11,14 +11,14 @@ from attentionos.desktop.components.metric_card import MetricCard
 from attentionos.desktop.components.sessions_list import RecentSessionsList
 from attentionos.desktop.components.timeline import Timeline
 from attentionos.desktop.components.tracking_control import TrackingControl
+from attentionos.desktop.formatting import format_duration, format_long_date
 from attentionos.desktop.theme import COLORS, SPACING, TYPOGRAPHY
 from attentionos.desktop.view_model import (
     DashboardSnapshot,
     build_top_apps,
-    compute_current_state,
-    format_duration,
 )
 from attentionos.localization import Translator
+from attentionos.sessions.metrics import DailySummary
 
 
 class ActivityPattern(Card):
@@ -105,7 +105,7 @@ class DashboardView(tk.Frame):
 
         self._build_top_bar()
         self._build_hero(task_var, task_labels)
-        self.timeline = Timeline(self, callbacks["previous_day"], callbacks["next_day"])
+        self.timeline = Timeline(self, callbacks["previous_day"], callbacks["next_day"], translator)
         self.timeline.grid(row=2, column=0, sticky="nsew", padx=SPACING.xl, pady=(0, SPACING.md))
         self._build_secondary()
 
@@ -208,24 +208,56 @@ class DashboardView(tk.Frame):
 
     def apply_snapshot(self, snapshot: DashboardSnapshot) -> None:
         summary = snapshot.summary
-        state = compute_current_state(summary)
-        self.date_label.set(snapshot.target_date.strftime("%A, %B %d, %Y"))
-        self.tracking.set_state(state.value, state.label, state.detail)
+        state_value, state_label, state_detail = self._current_state_text(summary)
+        self.date_label.set(format_long_date(snapshot.target_date, self.translator))
+        self.tracking.set_state(state_value, state_label, state_detail)
         focused_seconds = sum(s.duration_seconds for s in snapshot.sessions if s.is_focus)
         self.focused_card.set(
-            format_duration(focused_seconds),
-            f"{summary.focus_sessions} blocks",
+            format_duration(focused_seconds, self.translator),
+            self.translator.plural("units.blocks", summary.focus_sessions),
         )
         self.active_card.set(
-            format_duration(summary.total_active_seconds),
-            f"{snapshot.event_count} events",
+            format_duration(summary.total_active_seconds, self.translator),
+            self.translator.plural("units.events", snapshot.event_count),
         )
-        self.avg_card.set(format_duration(summary.mean_focus_block_sec), "Avg session")
-        self.switch_card.set(str(summary.total_context_switches), "Switches")
+        self.avg_card.set(
+            format_duration(summary.mean_focus_block_sec, self.translator),
+            self.translator.t("metrics.avg_session"),
+        )
+        self.switch_card.set(
+            str(summary.total_context_switches),
+            self.translator.plural("units.switches", summary.total_context_switches),
+        )
         self.timeline.set_snapshot(snapshot)
         self.pattern.set_data(snapshot.switch_windows)
         self.top_apps.set_apps(build_top_apps(summary))
         self.sessions.set_sessions(snapshot.sessions)
+
+    def _current_state_text(self, summary: DailySummary) -> tuple[str, str, str]:
+        if summary.total_sessions == 0:
+            return (
+                "-",
+                self.translator.t("dashboard.current_state_no_data"),
+                self.translator.t("dashboard.current_state_no_data_detail"),
+            )
+        if summary.focus_sessions > 0:
+            minutes = int(round(summary.max_focus_block_sec / 60))
+            return (
+                str(minutes),
+                self.translator.t("dashboard.current_state_best_focus"),
+                self.translator.t("dashboard.current_state_best_focus_detail"),
+            )
+        if summary.total_active_seconds > 0:
+            return (
+                format_duration(summary.total_active_seconds, self.translator),
+                self.translator.t("dashboard.current_state_active"),
+                self.translator.t("dashboard.current_state_active_detail"),
+            )
+        return (
+            self.translator.t("dashboard.current_state_idle"),
+            self.translator.t("dashboard.current_state_idle_label"),
+            self.translator.t("dashboard.current_state_idle_detail"),
+        )
 
     def set_tracking(self, active: bool, elapsed: str) -> None:
         self.top_status_var.set(

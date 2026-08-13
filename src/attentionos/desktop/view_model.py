@@ -1,4 +1,4 @@
-"""Small presentation helpers for the native dashboard."""
+﻿"""Small presentation helpers for the native dashboard."""
 
 from __future__ import annotations
 
@@ -6,6 +6,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import date
 
+from attentionos.desktop.formatting import format_duration
 from attentionos.sessions.builder import build_sessions_for_day
 from attentionos.sessions.metrics import (
     DailySummary,
@@ -65,19 +66,6 @@ def build_dashboard_snapshot(
     )
 
 
-def format_duration(seconds: float) -> str:
-    """Format a duration for compact dashboard metrics."""
-    if seconds <= 0:
-        return "0m"
-    minutes = int(round(seconds / 60))
-    if minutes < 60:
-        return f"{minutes}m"
-    hours, rest = divmod(minutes, 60)
-    if rest == 0:
-        return f"{hours}h"
-    return f"{hours}h {rest}m"
-
-
 def clean_app_name(process_name: str) -> str:
     """Return a readable app name from a process executable."""
     name = process_name.strip() or "Unknown"
@@ -89,7 +77,7 @@ def clean_app_name(process_name: str) -> str:
 def compute_current_state(summary: DailySummary) -> CurrentState:
     """Derive a conservative current-state display from existing data only."""
     if summary.total_sessions == 0:
-        return CurrentState("—", "No data yet", "Start tracking to build today's baseline.")
+        return CurrentState("-", "No data yet", "Start tracking to build today's baseline.")
     if summary.focus_sessions > 0:
         minutes = int(round(summary.max_focus_block_sec / 60))
         return CurrentState(

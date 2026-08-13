@@ -25,6 +25,7 @@ class UserPreferences(BaseModel):
     launch_on_startup: bool = False
     minimize_to_tray: bool = False
     start_minimized: bool = False
+    current_task_label: str = "None"
 
 
 class TrackingSettings(BaseModel):

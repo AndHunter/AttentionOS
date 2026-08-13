@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import tkinter as tk
 from collections.abc import Callable
-from tkinter import ttk
+from tkinter import messagebox, ttk
 
 from attentionos.desktop.components.base import TextButton
 from attentionos.desktop.theme import COLORS, SPACING, TYPOGRAPHY
@@ -34,6 +34,7 @@ class SettingsWindow(tk.Toplevel):
         self.minsize(720, 620)
         self.transient(master)
         self._configure_ttk()
+        self.protocol("WM_DELETE_WINDOW", self.destroy)
 
         self.columnconfigure(0, weight=1)
         self.rowconfigure(1, weight=1)
@@ -61,6 +62,8 @@ class SettingsWindow(tk.Toplevel):
         TextButton(actions, translator.t("settings.save"), self._save, variant="primary").pack(
             side="left"
         )
+        self.update_idletasks()
+        self._center_on_parent(master)
 
     def _section(self, notebook: ttk.Notebook, key: str) -> tk.Frame:
         frame = tk.Frame(notebook, bg=COLORS.surface, padx=SPACING.xl, pady=SPACING.xl)
@@ -89,9 +92,29 @@ class SettingsWindow(tk.Toplevel):
         self.language = tk.StringVar(value=self.settings.preferences.language)
         self.theme = tk.StringVar(value=self.settings.preferences.theme)
         row = 0
-        self._option(frame, row, "settings.language", self.language, ["system", "en", "ru"])
+        self._option(
+            frame,
+            row,
+            "settings.language",
+            self.language,
+            {
+                "system": self.translator.t("settings.system"),
+                "en": self.translator.t("settings.english"),
+                "ru": self.translator.t("settings.russian"),
+            },
+        )
         row += 1
-        self._option(frame, row, "settings.theme", self.theme, ["system", "light", "dark"])
+        self._option(
+            frame,
+            row,
+            "settings.theme",
+            self.theme,
+            {
+                "system": self.translator.t("settings.system"),
+                "light": self.translator.t("settings.light"),
+                "dark": self.translator.t("settings.dark"),
+            },
+        )
         row += 1
         self.launch = self._check(
             frame,
@@ -221,7 +244,7 @@ class SettingsWindow(tk.Toplevel):
             2,
             "settings.notification_interval",
             self.interval,
-            ["15", "30", "45", "60"],
+            {"15": "15", "30": "30", "45": "45", "60": "60"},
         )
         self.dnd_start = tk.StringVar(value=self.settings.notifications.do_not_disturb_start)
         self.dnd_end = tk.StringVar(value=self.settings.notifications.do_not_disturb_end)
@@ -296,16 +319,18 @@ class SettingsWindow(tk.Toplevel):
                 fg=COLORS.text_secondary,
                 font=TYPOGRAPHY.body,
             ).grid(row=row, column=1, sticky="w", pady=SPACING.xs)
-        train_enabled = counts.get("reports", 0) >= counts.get("min_training_samples", 30)
         TextButton(
             frame,
             self.translator.t("settings.train"),
-            lambda: None,
-            enabled=train_enabled,
+            self._show_unavailable,
+            enabled=False,
         ).grid(row=4, column=0, sticky="w", pady=(SPACING.lg, 0))
         tk.Label(
             frame,
-            text=f"{counts.get('reports', 0)}/{counts.get('min_training_samples', 30)}",
+            text=(
+                f"{counts.get('reports', 0)}/{counts.get('min_training_samples', 30)}. "
+                f"{self.translator.t('settings.training_unavailable')}"
+            ),
             bg=COLORS.surface,
             fg=COLORS.text_secondary,
             font=TYPOGRAPHY.caption,
@@ -345,10 +370,18 @@ class SettingsWindow(tk.Toplevel):
         row: int,
         key: str,
         var: tk.StringVar,
-        values: list[str],
+        values: dict[str, str],
     ) -> None:
         self._label(frame, row, key)
-        menu = tk.OptionMenu(frame, var, *values)
+        current = var.get()
+        display_to_value = {display: value for value, display in values.items()}
+        value_to_display = values
+        var.set(value_to_display.get(current, current))
+
+        def select(display_value: str) -> None:
+            var.set(display_value)
+
+        menu = tk.OptionMenu(frame, var, *values.values(), command=select)
         menu.configure(
             bg=COLORS.surface_secondary,
             fg=COLORS.text,
@@ -369,6 +402,7 @@ class SettingsWindow(tk.Toplevel):
             font=TYPOGRAPHY.body,
         )
         menu.grid(row=row, column=1, sticky="w", pady=SPACING.xs)
+        setattr(self, f"_{key.replace('.', '_')}_display_to_value", display_to_value)
 
     def _check(self, frame: tk.Frame, row: int, key: str, initial: bool) -> tk.BooleanVar:
         var = tk.BooleanVar(value=initial)
@@ -411,8 +445,13 @@ class SettingsWindow(tk.Toplevel):
             self.excluded.delete(index)
 
     def _save(self) -> None:
-        self.settings.preferences.language = self.language.get()  # type: ignore[assignment]
-        self.settings.preferences.theme = self.theme.get()  # type: ignore[assignment]
+        language_map = self._settings_language_display_to_value
+        theme_map = self._settings_theme_display_to_value
+        interval_map = self._settings_notification_interval_display_to_value
+        language_value = language_map.get(self.language.get(), self.language.get())
+        theme_value = theme_map.get(self.theme.get(), self.theme.get())
+        self.settings.preferences.language = language_value  # type: ignore[assignment]
+        self.settings.preferences.theme = theme_value  # type: ignore[assignment]
         self.settings.preferences.launch_on_startup = self.launch.get()
         self.settings.preferences.minimize_to_tray = self.tray.get()
         self.settings.preferences.start_minimized = self.start_minimized.get()
@@ -426,8 +465,33 @@ class SettingsWindow(tk.Toplevel):
         ]
         self.settings.notifications.break_recommendations = self.breaks.get()
         self.settings.notifications.performance_warnings = self.performance_warnings.get()
-        self.settings.notifications.minimum_interval_minutes = int(self.interval.get())
+        self.settings.notifications.minimum_interval_minutes = int(
+            interval_map.get(self.interval.get(), self.interval.get())
+        )
         self.settings.notifications.do_not_disturb_start = self.dnd_start.get()
         self.settings.notifications.do_not_disturb_end = self.dnd_end.get()
         self.callbacks["save"](self.settings)
         self.destroy()
+
+    def _show_unavailable(self) -> None:
+        messagebox.showinfo(
+            self.translator.t("app.error_title"),
+            self.translator.t("settings.feature_unavailable"),
+            parent=self,
+        )
+
+    def _center_on_parent(self, parent: tk.Misc) -> None:
+        parent.update_idletasks()
+        width = self.winfo_width()
+        height = self.winfo_height()
+        parent_x = parent.winfo_rootx()
+        parent_y = parent.winfo_rooty()
+        parent_w = parent.winfo_width()
+        parent_h = parent.winfo_height()
+        x = parent_x + max((parent_w - width) // 2, 0)
+        y = parent_y + max((parent_h - height) // 2, 0)
+        screen_w = self.winfo_screenwidth()
+        screen_h = self.winfo_screenheight()
+        x = min(max(x, 0), max(screen_w - width, 0))
+        y = min(max(y, 0), max(screen_h - height, 0))
+        self.geometry(f"{width}x{height}+{x}+{y}")

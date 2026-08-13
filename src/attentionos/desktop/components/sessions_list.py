@@ -5,8 +5,9 @@ from __future__ import annotations
 import tkinter as tk
 
 from attentionos.desktop.components.base import Card
+from attentionos.desktop.formatting import format_duration
 from attentionos.desktop.theme import COLORS, SPACING, TYPOGRAPHY
-from attentionos.desktop.view_model import clean_app_name, format_duration
+from attentionos.desktop.view_model import clean_app_name
 from attentionos.localization import Translator
 from attentionos.storage.schema import Session
 
@@ -27,13 +28,6 @@ class RecentSessionsList(Card):
             fg=COLORS.text,
             font=TYPOGRAPHY.section,
         ).grid(row=0, column=0, sticky="w")
-        tk.Label(
-            header,
-            text=translator.t("dashboard.view_all") + " >",
-            bg=COLORS.surface,
-            fg=COLORS.accent,
-            font=TYPOGRAPHY.caption_semibold,
-        ).grid(row=0, column=1, sticky="e")
         self.rows = tk.Frame(self.inner, bg=COLORS.surface)
         self.rows.pack(fill="both", expand=True, pady=(SPACING.md, 0))
 
@@ -43,7 +37,7 @@ class RecentSessionsList(Card):
         if not sessions:
             tk.Label(
                 self.rows,
-                text="Sessions will appear here after tracking starts.",
+                text=self.translator.t("dashboard.sessions_empty"),
                 bg=COLORS.surface,
                 fg=COLORS.text_secondary,
                 font=TYPOGRAPHY.body,
@@ -53,7 +47,12 @@ class RecentSessionsList(Card):
         header = tk.Frame(self.rows, bg=COLORS.surface)
         header.pack(fill="x", pady=(0, SPACING.xs))
         for idx, (text, width) in enumerate(
-            [("Time", 16), ("Application", 22), ("Duration", 12), ("Task", 16)]
+            [
+                (self.translator.t("table.time"), 16),
+                (self.translator.t("table.application"), 22),
+                (self.translator.t("table.duration"), 12),
+                (self.translator.t("table.task"), 16),
+            ]
         ):
             tk.Label(
                 header,
@@ -75,8 +74,8 @@ class RecentSessionsList(Card):
         values = [
             f"{session.ts_start.strftime('%H:%M')} - {session.ts_end.strftime('%H:%M')}",
             clean_app_name(session.process_name),
-            format_duration(session.duration_seconds),
-            session.task_label or "-",
+            format_duration(session.duration_seconds, self.translator),
+            session.task_label or self.translator.t("table.no_task"),
         ]
         widths = [16, 22, 12, 16]
         for idx, (value, width) in enumerate(zip(values, widths, strict=True)):
