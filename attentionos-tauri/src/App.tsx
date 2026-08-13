@@ -86,6 +86,7 @@ function App() {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [drawerOpen, setDrawerOpen] = useState(false)
+  const [settingsOpen, setSettingsOpen] = useState(false)
 
   async function refresh(target = date) {
     setLoading(true)
@@ -138,6 +139,9 @@ function App() {
           </button>
           <button type="button" className="button ghost" onClick={() => setDrawerOpen(true)}>
             Notifications {unreadCount > 0 && <span className="badge">{unreadCount}</span>}
+          </button>
+          <button type="button" className="button ghost" onClick={() => setSettingsOpen(true)}>
+            Settings
           </button>
         </div>
       </header>
@@ -313,6 +317,53 @@ function App() {
           </div>
         </aside>
       )}
+
+      {settingsOpen && (
+        <aside className="drawer">
+          <div className="drawer-backdrop" onClick={() => setSettingsOpen(false)} />
+          <div className="drawer-panel">
+            <div className="panel-header">
+              <div>
+                <h2>Settings</h2>
+                <p>Local desktop shell preferences and system status.</p>
+              </div>
+              <button type="button" className="icon-button" onClick={() => setSettingsOpen(false)}>×</button>
+            </div>
+
+            <div className="settings-stack">
+              <section className="settings-group">
+                <h3>Privacy</h3>
+                <SettingRow label="Data storage" value="Local SQLite only" />
+                <SettingRow label="Typed text" value="Never recorded" />
+                <SettingRow label="Screenshots" value="Disabled / not supported" />
+                <SettingRow label="Window titles" value="Controlled by Python collector settings" />
+              </section>
+
+              <section className="settings-group">
+                <h3>Telemetry</h3>
+                <SettingRow label="Collector" value="Existing Python engine" />
+                <SettingRow label="Current database" value={dashboard?.db_path ?? 'Not loaded'} />
+                <SettingRow label="Events loaded" value={(dashboard?.event_count ?? 0).toString()} />
+                <SettingRow label="Selected day" value={dashboard ? formatDate(dashboard.date) : formatDate(date)} />
+              </section>
+
+              <section className="settings-group">
+                <h3>Notifications</h3>
+                <SettingRow label="Recommendation engine" value="Enabled in Python desktop runtime" />
+                <SettingRow label="Unread notifications" value={unreadCount.toString()} />
+                <SettingRow label="Notification center" value="Available in this Tauri shell" />
+              </section>
+
+              <section className="settings-group">
+                <h3>Interface</h3>
+                <SettingRow label="Theme" value="Light mode" />
+                <SettingRow label="Minimum window" value="1000 × 700" />
+                <SettingRow label="Shell" value="Tauri + React" />
+              </section>
+            </div>
+          </div>
+        </aside>
+      )}
     </main>
   )
 }
@@ -327,6 +378,15 @@ function Bar({ label, value, max }: { label: string; value: number; max: number 
       <div className="bar-track">
         <span style={{ width: `${Math.min((value / Math.max(max, 1)) * 100, 100)}%` }} />
       </div>
+    </div>
+  )
+}
+
+function SettingRow({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="setting-row">
+      <span>{label}</span>
+      <strong>{value}</strong>
     </div>
   )
 }

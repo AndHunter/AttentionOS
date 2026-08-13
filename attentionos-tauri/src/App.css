@@ -363,6 +363,47 @@
   color: var(--muted);
 }
 
+.settings-stack {
+  display: grid;
+  gap: 14px;
+}
+
+.settings-group {
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 14px;
+  background: #fbfcfd;
+}
+
+.settings-group h3 {
+  margin: 0 0 10px;
+  font-size: 14px;
+}
+
+.setting-row {
+  display: grid;
+  grid-template-columns: minmax(120px, 0.8fr) minmax(0, 1.2fr);
+  gap: 12px;
+  padding: 9px 0;
+  border-top: 1px solid var(--border);
+  font-size: 13px;
+}
+
+.setting-row:first-of-type {
+  border-top: 0;
+}
+
+.setting-row span {
+  color: var(--muted);
+}
+
+.setting-row strong {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  color: var(--text);
+  font-weight: 650;
+}
+
 .dot {
   position: absolute;
   top: 18px;

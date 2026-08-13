@@ -73,6 +73,14 @@ struct EventRow {
     task_label: Option<String>,
 }
 
+#[derive(Debug)]
+struct TimedEvent<'a> {
+    event: &'a EventRow,
+    duration_seconds: i64,
+    start_minute: i64,
+    end_minute: i64,
+}
+
 #[tauri::command]
 fn get_dashboard(date: Option<String>) -> Result<DashboardPayload, String> {
     let target = date.unwrap_or_else(|| Local::now().date_naive().to_string());
@@ -182,21 +190,22 @@ fn load_events_for_day(conn: &Connection, date: &str) -> Result<Vec<EventRow>, S
 }
 
 fn build_dashboard(date: String, db_path: PathBuf, events: Vec<EventRow>) -> DashboardPayload {
+    let timed_events = timed_events(&events);
     let event_count = events.len() as i64;
-    let active_seconds = events
+    let active_seconds = timed_events
         .iter()
-        .filter(|event| event.idle_seconds < 120.0)
-        .map(event_duration_seconds)
+        .filter(|item| is_active_event(item.event))
+        .map(|item| item.duration_seconds)
         .sum::<i64>();
-    let focused_seconds = events
+    let focused_seconds = timed_events
         .iter()
-        .filter(|event| event.idle_seconds < 120.0 && !is_distraction(&event.process_name))
-        .map(event_duration_seconds)
+        .filter(|item| is_active_event(item.event) && !is_distraction(&item.event.process_name))
+        .map(|item| item.duration_seconds)
         .sum::<i64>();
     let context_switches = count_switches(&events);
-    let top_apps = top_apps(&events, active_seconds);
-    let timeline = timeline_segments(&events);
-    let recent_sessions = recent_sessions(&events);
+    let top_apps = top_apps(&timed_events, active_seconds);
+    let timeline = timeline_segments(&timed_events);
+    let recent_sessions = recent_sessions(&timed_events);
 
     let focused_minutes = active_seconds_to_minutes(focused_seconds);
     let active_minutes = active_seconds_to_minutes(active_seconds);
@@ -265,6 +274,33 @@ fn event_duration_seconds(event: &EventRow) -> i64 {
     end.signed_duration_since(start).num_seconds().max(0)
 }
 
+fn timed_events(events: &[EventRow]) -> Vec<TimedEvent<'_>> {
+    events
+        .iter()
+        .enumerate()
+        .map(|(index, event)| {
+            let start_time = parse_sqlite_time(&event.ts_start);
+            let raw_seconds = events
+                .get(index + 1)
+                .map(|next| {
+                    parse_sqlite_time(&next.ts_start)
+                        .signed_duration_since(start_time)
+                        .num_seconds()
+                })
+                .unwrap_or_else(|| event_duration_seconds(event).max(3));
+            let duration_seconds = raw_seconds.clamp(1, 15);
+            let start_minute = minute_of_day(&event.ts_start);
+            let end_minute = start_minute + ((duration_seconds as f64) / 60.0).ceil() as i64;
+            TimedEvent {
+                event,
+                duration_seconds,
+                start_minute,
+                end_minute: end_minute.max(start_minute + 1),
+            }
+        })
+        .collect()
+}
+
 fn parse_sqlite_time(value: &str) -> chrono::NaiveDateTime {
     let normalized = value.replace('T', " ");
     let trimmed = normalized.split('.').next().unwrap_or(&normalized);
@@ -278,7 +314,11 @@ fn minute_of_day(value: &str) -> i64 {
 }
 
 fn active_seconds_to_minutes(seconds: i64) -> i64 {
-    ((seconds as f64) / 60.0).round() as i64
+    if seconds <= 0 {
+        0
+    } else {
+        ((seconds as f64) / 60.0).ceil() as i64
+    }
 }
 
 fn format_minutes(minutes: i64) -> String {
@@ -305,6 +345,10 @@ fn is_distraction(process_name: &str) -> bool {
         .any(|item| lower.contains(item))
 }
 
+fn is_active_event(event: &EventRow) -> bool {
+    event.keyboard_events > 0 || event.mouse_events > 0 || event.idle_seconds < 120.0
+}
+
 fn count_switches(events: &[EventRow]) -> i64 {
     events
         .windows(2)
@@ -312,12 +356,12 @@ fn count_switches(events: &[EventRow]) -> i64 {
         .count() as i64
 }
 
-fn top_apps(events: &[EventRow], active_seconds: i64) -> Vec<AppUsage> {
+fn top_apps(events: &[TimedEvent<'_>], active_seconds: i64) -> Vec<AppUsage> {
     let mut totals = BTreeMap::<String, i64>::new();
-    for event in events.iter().filter(|event| event.idle_seconds < 120.0) {
+    for item in events.iter().filter(|item| is_active_event(item.event)) {
         *totals
-            .entry(clean_app_name(&event.process_name))
-            .or_default() += event_duration_seconds(event);
+            .entry(clean_app_name(&item.event.process_name))
+            .or_default() += item.duration_seconds;
     }
     let mut rows = totals
         .into_iter()
@@ -336,21 +380,23 @@ fn top_apps(events: &[EventRow], active_seconds: i64) -> Vec<AppUsage> {
     rows
 }
 
-fn timeline_segments(events: &[EventRow]) -> Vec<TimelineSegment> {
+fn timeline_segments(events: &[TimedEvent<'_>]) -> Vec<TimelineSegment> {
     let mut segments: Vec<TimelineSegment> = Vec::new();
-    for event in events {
-        let start = minute_of_day(&event.ts_start);
-        let end = minute_of_day(&event.ts_end).max(start + 1);
+    for item in events {
+        let start = item.start_minute;
+        let end = item.end_minute;
         if let Some(last) = segments.last_mut() {
-            if last.app == clean_app_name(&event.process_name) && last.task == event.task_label {
+            if last.app == clean_app_name(&item.event.process_name)
+                && last.task == item.event.task_label
+            {
                 last.end_minute = end;
                 last.duration_minutes = (last.end_minute - last.start_minute).max(1);
                 continue;
             }
         }
         segments.push(TimelineSegment {
-            app: clean_app_name(&event.process_name),
-            task: event.task_label.clone(),
+            app: clean_app_name(&item.event.process_name),
+            task: item.event.task_label.clone(),
             start_minute: start,
             end_minute: end,
             duration_minutes: (end - start).max(1),
@@ -359,7 +405,7 @@ fn timeline_segments(events: &[EventRow]) -> Vec<TimelineSegment> {
     segments
 }
 
-fn recent_sessions(events: &[EventRow]) -> Vec<RecentSession> {
+fn recent_sessions(events: &[TimedEvent<'_>]) -> Vec<RecentSession> {
     timeline_segments(events)
         .into_iter()
         .rev()
