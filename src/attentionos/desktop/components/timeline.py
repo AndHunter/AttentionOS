@@ -20,14 +20,14 @@ class Timeline(Card):
         on_previous_day: Callable[[], None],
         on_next_day: Callable[[], None],
     ) -> None:
-        super().__init__(master, padding=SPACING.lg)
+        super().__init__(master, padding=SPACING.xl, variant="hero")
         self.snapshot: DashboardSnapshot | None = None
         self._segments: list[tuple[int, object]] = []
         self.date_var = tk.StringVar(value="Today")
         self.tooltip = tk.Label(
             self,
-            bg="#20242B",
-            fg="#FFFFFF",
+            bg=COLORS.overlay,
+            fg=COLORS.text,
             font=TYPOGRAPHY.caption,
             padx=SPACING.sm,
             pady=SPACING.xs,
@@ -39,7 +39,7 @@ class Timeline(Card):
         header.columnconfigure(0, weight=1)
         tk.Label(
             header,
-            text="Timeline",
+            text="Daily Timeline",
             bg=COLORS.surface,
             fg=COLORS.text,
             font=TYPOGRAPHY.section,
@@ -59,7 +59,7 @@ class Timeline(Card):
 
         self.canvas = tk.Canvas(
             self.inner,
-            height=230,
+            height=260,
             bg=COLORS.surface,
             bd=0,
             highlightthickness=0,
@@ -80,10 +80,10 @@ class Timeline(Card):
         self._segments.clear()
         snapshot = self.snapshot
         width = max(self.canvas.winfo_width(), 700)
-        left = 56
-        right = width - 28
-        top = 78
-        height = 48
+        left = 64
+        right = width - 32
+        top = 92
+        height = 58
 
         tk_font = TYPOGRAPHY.caption
         self.canvas.create_text(
@@ -104,10 +104,20 @@ class Timeline(Card):
             fill=COLORS.surface_secondary,
             outline="",
         )
+        draw_rounded_rect(
+            self.canvas,
+            left - 8,
+            top - 8,
+            right + 8,
+            top + height + 8,
+            radius=RADIUS.lg,
+            fill="",
+            outline=COLORS.border,
+        )
 
         for hour in range(9, 19):
             x = left + (right - left) * ((hour - 9) / 9)
-            self.canvas.create_line(x, top - 12, x, top + height + 12, fill=COLORS.border)
+            self.canvas.create_line(x, top - 18, x, top + height + 18, fill=COLORS.border)
             self.canvas.create_text(
                 x,
                 top + height + 30,
@@ -149,9 +159,9 @@ class Timeline(Card):
             if session.is_focus:
                 self.canvas.create_rectangle(
                     x1,
-                    top - 7,
+                    top - 9,
                     x2,
-                    top - 3,
+                    top - 4,
                     fill=COLORS.accent,
                     outline="",
                 )
@@ -162,7 +172,7 @@ class Timeline(Card):
             top + height / 2 - 8,
             text="No focus data yet",
             fill=COLORS.text,
-            font=TYPOGRAPHY.body_semibold,
+            font=TYPOGRAPHY.section,
         )
         self.canvas.create_text(
             width / 2,

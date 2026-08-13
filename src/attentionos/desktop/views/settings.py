@@ -33,6 +33,7 @@ class SettingsWindow(tk.Toplevel):
         self.geometry("760x680")
         self.minsize(720, 620)
         self.transient(master)
+        self._configure_ttk()
 
         self.columnconfigure(0, weight=1)
         self.rowconfigure(1, weight=1)
@@ -44,7 +45,7 @@ class SettingsWindow(tk.Toplevel):
             font=TYPOGRAPHY.page_title,
         ).grid(row=0, column=0, sticky="w", padx=SPACING.xl, pady=(SPACING.lg, SPACING.md))
 
-        notebook = ttk.Notebook(self)
+        notebook = ttk.Notebook(self, style="AttentionOS.TNotebook")
         notebook.grid(row=1, column=0, sticky="nsew", padx=SPACING.xl)
         self._build_general(notebook)
         self._build_tracking(notebook)
@@ -62,10 +63,26 @@ class SettingsWindow(tk.Toplevel):
         )
 
     def _section(self, notebook: ttk.Notebook, key: str) -> tk.Frame:
-        frame = tk.Frame(notebook, bg=COLORS.surface, padx=SPACING.lg, pady=SPACING.lg)
+        frame = tk.Frame(notebook, bg=COLORS.surface, padx=SPACING.xl, pady=SPACING.xl)
         notebook.add(frame, text=self.translator.t(key))
         frame.columnconfigure(1, weight=1)
         return frame
+
+    def _configure_ttk(self) -> None:
+        style = ttk.Style(self)
+        style.configure("AttentionOS.TNotebook", background=COLORS.background, borderwidth=0)
+        style.configure(
+            "AttentionOS.TNotebook.Tab",
+            background=COLORS.surface_secondary,
+            foreground=COLORS.text_secondary,
+            padding=(16, 10),
+            font=TYPOGRAPHY.body_semibold,
+        )
+        style.map(
+            "AttentionOS.TNotebook.Tab",
+            background=[("selected", COLORS.surface), ("active", COLORS.surface_hover)],
+            foreground=[("selected", COLORS.text), ("active", COLORS.text)],
+        )
 
     def _build_general(self, notebook: ttk.Notebook) -> None:
         frame = self._section(notebook, "settings.general")
@@ -140,9 +157,29 @@ class SettingsWindow(tk.Toplevel):
             textvariable=self.idle_threshold,
             width=8,
             font=TYPOGRAPHY.body,
+            bg=COLORS.surface_secondary,
+            fg=COLORS.text,
+            buttonbackground=COLORS.surface_secondary,
+            insertbackground=COLORS.text,
+            relief="flat",
+            highlightbackground=COLORS.border,
+            highlightcolor=COLORS.accent,
+            highlightthickness=1,
         ).grid(row=0, column=1, sticky="w", pady=SPACING.xs)
         self.excluded_entry = tk.StringVar()
-        self.excluded = tk.Listbox(frame, height=7, font=TYPOGRAPHY.body)
+        self.excluded = tk.Listbox(
+            frame,
+            height=7,
+            font=TYPOGRAPHY.body,
+            bg=COLORS.surface_secondary,
+            fg=COLORS.text,
+            selectbackground=COLORS.accent,
+            selectforeground=COLORS.accent_text,
+            relief="flat",
+            highlightbackground=COLORS.border,
+            highlightcolor=COLORS.accent,
+            highlightthickness=1,
+        )
         self.excluded.grid(row=6, column=0, columnspan=2, sticky="ew", pady=(SPACING.sm, 0))
         for item in self.settings.tracking.excluded_applications:
             self.excluded.insert("end", item)
@@ -150,7 +187,7 @@ class SettingsWindow(tk.Toplevel):
         entry_row = tk.Frame(frame, bg=COLORS.surface)
         entry_row.grid(row=7, column=0, columnspan=2, sticky="ew", pady=SPACING.sm)
         entry_row.columnconfigure(0, weight=1)
-        tk.Entry(entry_row, textvariable=self.excluded_entry, font=TYPOGRAPHY.body).grid(
+        self._styled_entry(entry_row, self.excluded_entry).grid(
             row=0, column=0, sticky="ew", ipady=SPACING.xs
         )
         TextButton(entry_row, self.translator.t("settings.add_app"), self._add_excluded).grid(
@@ -298,7 +335,7 @@ class SettingsWindow(tk.Toplevel):
 
     def _entry(self, frame: tk.Frame, row: int, key: str, var: tk.StringVar) -> None:
         self._label(frame, row, key)
-        tk.Entry(frame, textvariable=var, font=TYPOGRAPHY.body).grid(
+        self._styled_entry(frame, var).grid(
             row=row, column=1, sticky="w", pady=SPACING.xs, ipady=SPACING.xs
         )
 
@@ -311,7 +348,27 @@ class SettingsWindow(tk.Toplevel):
         values: list[str],
     ) -> None:
         self._label(frame, row, key)
-        tk.OptionMenu(frame, var, *values).grid(row=row, column=1, sticky="w", pady=SPACING.xs)
+        menu = tk.OptionMenu(frame, var, *values)
+        menu.configure(
+            bg=COLORS.surface_secondary,
+            fg=COLORS.text,
+            activebackground=COLORS.surface_hover,
+            activeforeground=COLORS.text,
+            highlightthickness=1,
+            highlightbackground=COLORS.border,
+            bd=0,
+            font=TYPOGRAPHY.body,
+            padx=SPACING.sm,
+            pady=SPACING.xs,
+        )
+        menu["menu"].configure(
+            bg=COLORS.surface_secondary,
+            fg=COLORS.text,
+            activebackground=COLORS.surface_hover,
+            activeforeground=COLORS.text,
+            font=TYPOGRAPHY.body,
+        )
+        menu.grid(row=row, column=1, sticky="w", pady=SPACING.xs)
 
     def _check(self, frame: tk.Frame, row: int, key: str, initial: bool) -> tk.BooleanVar:
         var = tk.BooleanVar(value=initial)
@@ -322,9 +379,26 @@ class SettingsWindow(tk.Toplevel):
             bg=COLORS.surface,
             fg=COLORS.text,
             activebackground=COLORS.surface,
+            activeforeground=COLORS.text,
+            selectcolor=COLORS.surface_secondary,
             font=TYPOGRAPHY.body,
         ).grid(row=row, column=0, columnspan=2, sticky="w", pady=SPACING.xs)
         return var
+
+    @staticmethod
+    def _styled_entry(master: tk.Misc, var: tk.StringVar) -> tk.Entry:
+        return tk.Entry(
+            master,
+            textvariable=var,
+            font=TYPOGRAPHY.body,
+            bg=COLORS.surface_secondary,
+            fg=COLORS.text,
+            insertbackground=COLORS.text,
+            relief="flat",
+            highlightbackground=COLORS.border,
+            highlightcolor=COLORS.accent,
+            highlightthickness=1,
+        )
 
     def _add_excluded(self) -> None:
         value = self.excluded_entry.get().strip()

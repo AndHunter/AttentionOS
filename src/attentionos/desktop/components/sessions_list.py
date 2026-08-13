@@ -15,7 +15,7 @@ class RecentSessionsList(Card):
     """Modern list-style replacement for raw TreeView."""
 
     def __init__(self, master: tk.Misc, translator: Translator) -> None:
-        super().__init__(master, padding=SPACING.lg)
+        super().__init__(master, padding=SPACING.xl)
         self.translator = translator
         header = tk.Frame(self.inner, bg=COLORS.surface)
         header.pack(fill="x")
@@ -29,7 +29,7 @@ class RecentSessionsList(Card):
         ).grid(row=0, column=0, sticky="w")
         tk.Label(
             header,
-            text=translator.t("dashboard.view_all") + " ->",
+            text=translator.t("dashboard.view_all") + " >",
             bg=COLORS.surface,
             fg=COLORS.accent,
             font=TYPOGRAPHY.caption_semibold,
@@ -69,7 +69,7 @@ class RecentSessionsList(Card):
             self._add_row(session)
 
     def _add_row(self, session: Session) -> None:
-        row = tk.Frame(self.rows, bg=COLORS.surface, height=42)
+        row = tk.Frame(self.rows, bg=COLORS.surface, height=46)
         row.pack(fill="x", pady=(0, 1))
         row.pack_propagate(False)
         values = [

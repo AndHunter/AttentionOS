@@ -9,6 +9,7 @@ import threading
 import tkinter as tk
 import winreg
 from contextlib import suppress
+from ctypes import windll
 from datetime import UTC, date, datetime, timedelta
 from tkinter import filedialog, messagebox, ttk
 
@@ -90,7 +91,22 @@ class AttentionOSDesktopApp(tk.Tk):
         theme = self.runtime_settings.preferences.theme
         if theme == "dark":
             return "dark"
+        if theme == "system":
+            try:
+                key_path = r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize"
+                with winreg.OpenKey(winreg.HKEY_CURRENT_USER, key_path) as key:
+                    apps_light, _ = winreg.QueryValueEx(key, "AppsUseLightTheme")
+                return "light" if apps_light else "dark"
+            except OSError:
+                return "dark" if self._windows_apps_dark_fallback() else "light"
         return "light"
+
+    @staticmethod
+    def _windows_apps_dark_fallback() -> bool:
+        try:
+            return bool(windll.dwmapi.ShouldAppsUseDarkMode())
+        except Exception:
+            return False
 
     def _configure_styles(self) -> None:
         style = ttk.Style(self)

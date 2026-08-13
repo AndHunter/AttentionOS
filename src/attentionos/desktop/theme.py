@@ -24,27 +24,31 @@ class Colors:
     danger: str = "#D95C5C"
     idle: str = "#A8AFB8"
     overlay: str = "#E9ECEF"
+    glow: str = "#DCEFEA"
+    accent_text: str = "#FFFFFF"
 
 
 LIGHT_COLORS = Colors()
 DARK_COLORS = Colors(
-    background="#111317",
-    surface="#1A1D23",
-    surface_secondary="#242832",
-    surface_hover="#20242C",
-    border="#2E3440",
-    border_strong="#3A4250",
-    text="#F2F4F7",
-    text_secondary="#A8B0BD",
-    text_tertiary="#788292",
-    accent="#40B3A6",
-    accent_hover="#36A196",
-    accent_soft="#173B38",
-    success="#4AB889",
-    warning="#E0A84A",
-    danger="#E06B6B",
-    idle="#6E7785",
-    overlay="#2A303A",
+    background="#0D1210",
+    surface="#151B18",
+    surface_secondary="#1B231F",
+    surface_hover="#222C27",
+    border="#25302B",
+    border_strong="#34433D",
+    text="#F4F7F5",
+    text_secondary="#9BA8A1",
+    text_tertiary="#68746E",
+    accent="#9BE15D",
+    accent_hover="#88CE50",
+    accent_soft="#172815",
+    success="#4BD38A",
+    warning="#D6A84A",
+    danger="#F07171",
+    idle="#5E6963",
+    overlay="#202A26",
+    glow="#1D3818",
+    accent_text="#0B120D",
 )
 
 
@@ -69,14 +73,14 @@ class Radius:
 class Typography:
     family: str = "Segoe UI Variable"
     fallback: str = "Segoe UI"
-    display: tuple[str, int, str] = ("Segoe UI Variable", 38, "bold")
-    page_title: tuple[str, int, str] = ("Segoe UI Variable", 28, "bold")
-    section: tuple[str, int, str] = ("Segoe UI Variable", 16, "bold")
-    metric: tuple[str, int, str] = ("Segoe UI Variable", 26, "bold")
-    body: tuple[str, int] = ("Segoe UI Variable", 13)
-    body_semibold: tuple[str, int, str] = ("Segoe UI Variable", 13, "bold")
-    caption: tuple[str, int] = ("Segoe UI Variable", 11)
-    caption_semibold: tuple[str, int, str] = ("Segoe UI Variable", 11, "bold")
+    display: tuple[str, int, str] = ("Segoe UI Variable", 42, "bold")
+    page_title: tuple[str, int, str] = ("Segoe UI Variable", 30, "bold")
+    section: tuple[str, int, str] = ("Segoe UI Variable", 18, "bold")
+    metric: tuple[str, int, str] = ("Segoe UI Variable", 30, "bold")
+    body: tuple[str, int] = ("Segoe UI Variable", 14)
+    body_semibold: tuple[str, int, str] = ("Segoe UI Variable", 14, "bold")
+    caption: tuple[str, int] = ("Segoe UI Variable", 12)
+    caption_semibold: tuple[str, int, str] = ("Segoe UI Variable", 12, "bold")
 
 
 COLORS = Colors()
@@ -85,14 +89,14 @@ RADIUS = Radius()
 TYPOGRAPHY = Typography()
 
 APP_COLORS = [
-    "#2F8F83",
-    "#6B7C93",
-    "#8A6FAD",
-    "#C8845A",
-    "#5D8AA8",
-    "#A87575",
-    "#7B8A5B",
-    "#9B7B52",
+    "#9BE15D",
+    "#4BD38A",
+    "#58A6FF",
+    "#C8A2FF",
+    "#D6A84A",
+    "#7DD3C7",
+    "#A8B3A6",
+    "#F07171",
 ]
 
 

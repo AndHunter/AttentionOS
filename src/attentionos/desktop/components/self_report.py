@@ -49,7 +49,7 @@ class RatingGroup(tk.Frame):
             selected = idx == value
             button.configure(
                 bg=COLORS.accent if selected else COLORS.surface_secondary,
-                fg="#FFFFFF" if selected else COLORS.text,
+                fg=COLORS.accent_text if selected else COLORS.text,
             )
 
 
@@ -112,6 +112,10 @@ class SelfReportDialog(tk.Toplevel):
             shell,
             bg=COLORS.surface_secondary,
             fg=COLORS.text,
+            insertbackground=COLORS.text,
+            highlightbackground=COLORS.border,
+            highlightcolor=COLORS.accent,
+            highlightthickness=1,
             relief="flat",
             font=TYPOGRAPHY.body,
             width=48,

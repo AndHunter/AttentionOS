@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import tkinter as tk
 
-from attentionos.desktop.components.base import Card
-from attentionos.desktop.theme import COLORS, SPACING, TYPOGRAPHY
+from attentionos.desktop.components.base import Card, draw_rounded_rect
+from attentionos.desktop.theme import COLORS, RADIUS, SPACING, TYPOGRAPHY
 from attentionos.desktop.view_model import TopApp, format_duration
 from attentionos.localization import Translator
 
@@ -14,7 +14,7 @@ class TopAppsList(Card):
     """Compact ranked list of top applications."""
 
     def __init__(self, master: tk.Misc, translator: Translator) -> None:
-        super().__init__(master, padding=SPACING.lg)
+        super().__init__(master, padding=SPACING.xl)
         self.translator = translator
         self.rows = tk.Frame(self.inner, bg=COLORS.surface)
         tk.Label(
@@ -78,5 +78,23 @@ class TopAppsList(Card):
     def _draw_bar(canvas: tk.Canvas, percent: float) -> None:
         canvas.delete("all")
         width = max(canvas.winfo_width(), 1)
-        canvas.create_rectangle(0, 0, width, 7, fill=COLORS.surface_secondary, outline="")
-        canvas.create_rectangle(0, 0, width * (percent / 100), 7, fill=COLORS.accent, outline="")
+        draw_rounded_rect(
+            canvas,
+            0,
+            0,
+            width,
+            7,
+            radius=RADIUS.sm,
+            fill=COLORS.surface_secondary,
+            outline="",
+        )
+        draw_rounded_rect(
+            canvas,
+            0,
+            0,
+            max(width * (percent / 100), 3),
+            7,
+            radius=RADIUS.sm,
+            fill=COLORS.accent,
+            outline="",
+        )

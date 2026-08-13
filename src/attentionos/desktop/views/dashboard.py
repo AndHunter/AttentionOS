@@ -6,7 +6,7 @@ import tkinter as tk
 from collections.abc import Callable
 
 from attentionos.desktop.components.app_list import TopAppsList
-from attentionos.desktop.components.base import Card, TextButton
+from attentionos.desktop.components.base import Card, Pill, TextButton, draw_rounded_rect
 from attentionos.desktop.components.metric_card import MetricCard
 from attentionos.desktop.components.sessions_list import RecentSessionsList
 from attentionos.desktop.components.timeline import Timeline
@@ -73,11 +73,13 @@ class ActivityPattern(Card):
             x1 = left + idx * step + 4
             x2 = left + (idx + 1) * step - 4
             bar_h = (bottom - top) * (count / max_count)
-            self.canvas.create_rectangle(
+            draw_rounded_rect(
+                self.canvas,
                 x1,
                 bottom - bar_h,
                 x2,
                 bottom,
+                radius=6,
                 fill=COLORS.accent,
                 outline="",
             )
@@ -98,23 +100,13 @@ class DashboardView(tk.Frame):
         self.callbacks = callbacks
         self.translator = translator
         self.columnconfigure(0, weight=1)
-        self.rowconfigure(4, weight=1)
+        self.rowconfigure(2, weight=3)
+        self.rowconfigure(3, weight=2)
 
         self._build_top_bar()
-        self.tracking = TrackingControl(
-            self,
-            task_var=task_var,
-            labels=task_labels,
-            on_task_change=callbacks["task_change"],
-            on_start=callbacks["start"],
-            on_stop=callbacks["stop"],
-            on_check_in=callbacks["check_in"],
-            translator=translator,
-        )
-        self.tracking.grid(row=1, column=0, sticky="ew", padx=SPACING.xl, pady=(0, SPACING.md))
-        self._build_metrics()
+        self._build_hero(task_var, task_labels)
         self.timeline = Timeline(self, callbacks["previous_day"], callbacks["next_day"])
-        self.timeline.grid(row=3, column=0, sticky="nsew", padx=SPACING.xl, pady=(0, SPACING.md))
+        self.timeline.grid(row=2, column=0, sticky="nsew", padx=SPACING.xl, pady=(0, SPACING.md))
         self._build_secondary()
 
     def _build_top_bar(self) -> None:
@@ -138,6 +130,9 @@ class DashboardView(tk.Frame):
         ).grid(row=1, column=0, sticky="w", pady=(SPACING.xxs, 0))
         right = tk.Frame(bar, bg=COLORS.background)
         right.grid(row=0, column=1, rowspan=2, sticky="e")
+        self.top_status_var = tk.StringVar(value=self.translator.t("tracking.status.stopped"))
+        self.top_status = Pill(right, self.top_status_var)
+        self.top_status.pack(side="left", padx=(0, SPACING.xs))
         self.privacy_var = tk.StringVar(value=self.translator.t("app.local_only"))
         tk.Label(
             right,
@@ -154,26 +149,47 @@ class DashboardView(tk.Frame):
             self.callbacks["settings"],
         ).pack(side="left")
 
-    def _build_metrics(self) -> None:
-        grid = tk.Frame(self, bg=COLORS.background)
-        grid.grid(row=2, column=0, sticky="ew", padx=SPACING.xl, pady=(0, SPACING.md))
-        grid.columnconfigure(0, weight=2, uniform="metrics")
-        for idx in range(1, 5):
-            grid.columnconfigure(idx, weight=1, uniform="metrics")
-        self.state_card = MetricCard(grid, self.translator.t("metrics.current_state"), large=True)
-        self.state_card.grid(row=0, column=0, sticky="nsew", padx=(0, SPACING.sm))
+    def _build_hero(self, task_var: tk.StringVar, task_labels: list[str]) -> None:
+        hero = tk.Frame(self, bg=COLORS.background)
+        hero.grid(row=1, column=0, sticky="nsew", padx=SPACING.xl, pady=(0, SPACING.md))
+        hero.columnconfigure(0, weight=2)
+        hero.columnconfigure(1, weight=1)
+
+        self.tracking = TrackingControl(
+            hero,
+            task_var=task_var,
+            labels=task_labels,
+            on_task_change=self.callbacks["task_change"],
+            on_start=self.callbacks["start"],
+            on_stop=self.callbacks["stop"],
+            on_check_in=self.callbacks["check_in"],
+            translator=self.translator,
+        )
+        self.tracking.grid(row=0, column=0, sticky="nsew", padx=(0, SPACING.md))
+
+        grid = tk.Frame(hero, bg=COLORS.background)
+        grid.grid(row=0, column=1, sticky="nsew")
+        for idx in range(2):
+            grid.columnconfigure(idx, weight=1)
+            grid.rowconfigure(idx, weight=1)
         self.focused_card = MetricCard(grid, self.translator.t("metrics.focused_time"))
-        self.focused_card.grid(row=0, column=1, sticky="nsew", padx=(0, SPACING.sm))
+        self.focused_card.grid(
+            row=0,
+            column=0,
+            sticky="nsew",
+            padx=(0, SPACING.sm),
+            pady=(0, SPACING.sm),
+        )
         self.active_card = MetricCard(grid, self.translator.t("metrics.active_time"))
-        self.active_card.grid(row=0, column=2, sticky="nsew", padx=(0, SPACING.sm))
+        self.active_card.grid(row=0, column=1, sticky="nsew", pady=(0, SPACING.sm))
         self.avg_card = MetricCard(grid, self.translator.t("metrics.avg_focus"))
-        self.avg_card.grid(row=0, column=3, sticky="nsew", padx=(0, SPACING.sm))
+        self.avg_card.grid(row=1, column=0, sticky="nsew", padx=(0, SPACING.sm))
         self.switch_card = MetricCard(grid, self.translator.t("metrics.context_switches"))
-        self.switch_card.grid(row=0, column=4, sticky="nsew")
+        self.switch_card.grid(row=1, column=1, sticky="nsew")
 
     def _build_secondary(self) -> None:
         lower = tk.Frame(self, bg=COLORS.background)
-        lower.grid(row=4, column=0, sticky="nsew", padx=SPACING.xl, pady=(0, SPACING.lg))
+        lower.grid(row=3, column=0, sticky="nsew", padx=SPACING.xl, pady=(0, SPACING.lg))
         lower.columnconfigure(0, weight=1)
         lower.columnconfigure(1, weight=1)
         lower.rowconfigure(1, weight=1)
@@ -194,7 +210,7 @@ class DashboardView(tk.Frame):
         summary = snapshot.summary
         state = compute_current_state(summary)
         self.date_label.set(snapshot.target_date.strftime("%A, %B %d, %Y"))
-        self.state_card.set(state.value, f"{state.label}. {state.detail}")
+        self.tracking.set_state(state.value, state.label, state.detail)
         focused_seconds = sum(s.duration_seconds for s in snapshot.sessions if s.is_focus)
         self.focused_card.set(
             format_duration(focused_seconds),
@@ -212,4 +228,10 @@ class DashboardView(tk.Frame):
         self.sessions.set_sessions(snapshot.sessions)
 
     def set_tracking(self, active: bool, elapsed: str) -> None:
+        self.top_status_var.set(
+            self.translator.t("tracking.status.active")
+            if active
+            else self.translator.t("tracking.status.stopped")
+        )
+        self.top_status.set_active(active)
         self.tracking.set_tracking(active, elapsed)

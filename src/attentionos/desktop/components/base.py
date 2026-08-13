@@ -9,18 +9,26 @@ from attentionos.desktop.theme import COLORS, RADIUS, SPACING, TYPOGRAPHY
 
 
 class Card(tk.Frame):
-    """White surface with subtle border."""
+    """Raised surface with subtle border."""
 
-    def __init__(self, master: tk.Misc, padding: int = SPACING.lg, **kwargs: object) -> None:
+    def __init__(
+        self,
+        master: tk.Misc,
+        padding: int = SPACING.lg,
+        variant: str = "default",
+        **kwargs: object,
+    ) -> None:
+        bg = COLORS.surface_secondary if variant == "soft" else COLORS.surface
+        border = COLORS.border_strong if variant == "hero" else COLORS.border
         super().__init__(
             master,
-            bg=COLORS.surface,
-            highlightbackground=COLORS.border,
+            bg=bg,
+            highlightbackground=border,
             highlightthickness=1,
             bd=0,
             **kwargs,
         )
-        self.inner = tk.Frame(self, bg=COLORS.surface)
+        self.inner = tk.Frame(self, bg=bg)
         self.inner.pack(fill="both", expand=True, padx=padding, pady=padding)
 
 
@@ -67,13 +75,13 @@ class TextButton(tk.Label):
             return COLORS.surface_secondary, COLORS.text_tertiary
         if self.variant == "primary":
             if state == "pressed":
-                return COLORS.accent_hover, "#FFFFFF"
+                return COLORS.accent_hover, COLORS.accent_text
             if state == "hover":
-                return COLORS.accent_hover, "#FFFFFF"
-            return COLORS.accent, "#FFFFFF"
+                return COLORS.accent_hover, COLORS.accent_text
+            return COLORS.accent, COLORS.accent_text
         if self.variant == "danger":
             if state in {"hover", "pressed"}:
-                return "#FBEAEA", COLORS.danger
+                return "#321E1E", COLORS.danger
             return COLORS.surface_secondary, COLORS.danger
         if state in {"hover", "pressed"}:
             return COLORS.overlay, COLORS.text
@@ -87,6 +95,53 @@ class TextButton(tk.Label):
         self._set_state("hover")
         if self.enabled:
             self.command()
+
+
+class Pill(tk.Frame):
+    """Compact status pill."""
+
+    def __init__(self, master: tk.Misc, textvariable: tk.StringVar, active: bool = False) -> None:
+        super().__init__(
+            master,
+            bg=COLORS.accent_soft if active else COLORS.surface_secondary,
+            highlightbackground=COLORS.border,
+            highlightthickness=1,
+            bd=0,
+        )
+        self.dot = tk.Canvas(
+            self,
+            width=14,
+            height=14,
+            bg=self["bg"],
+            bd=0,
+            highlightthickness=0,
+        )
+        self.dot.pack(side="left", padx=(SPACING.sm, SPACING.xs), pady=SPACING.xs)
+        self.dot_id = self.dot.create_oval(
+            3,
+            3,
+            11,
+            11,
+            fill=COLORS.success if active else COLORS.idle,
+            outline="",
+        )
+        self.label = tk.Label(
+            self,
+            textvariable=textvariable,
+            bg=self["bg"],
+            fg=COLORS.accent if active else COLORS.text_secondary,
+            font=TYPOGRAPHY.caption_semibold,
+            padx=(0),
+        )
+        self.label.pack(side="left", padx=(0, SPACING.sm), pady=SPACING.xs)
+
+    def set_active(self, active: bool) -> None:
+        bg = COLORS.accent_soft if active else COLORS.surface_secondary
+        fg = COLORS.accent if active else COLORS.text_secondary
+        self.configure(bg=bg)
+        self.dot.configure(bg=bg)
+        self.label.configure(bg=bg, fg=fg)
+        self.dot.itemconfigure(self.dot_id, fill=COLORS.success if active else COLORS.idle)
 
 
 class SectionHeader(tk.Frame):
