@@ -1,6 +1,6 @@
 use chrono::{Local, Timelike};
 use rusqlite::{params, Connection};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::env;
 use std::path::PathBuf;
@@ -60,6 +60,83 @@ struct NotificationPayload {
     body: String,
     state: String,
     kind: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct UserPreferences {
+    language: String,
+    theme: String,
+    launch_on_startup: bool,
+    minimize_to_tray: bool,
+    start_minimized: bool,
+    current_task_label: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct TrackingSettings {
+    idle_threshold_minutes: i64,
+    track_active_window: bool,
+    track_window_titles: bool,
+    track_keyboard_activity: bool,
+    track_mouse_activity: bool,
+    excluded_applications: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct NotificationSettings {
+    break_recommendations: bool,
+    performance_warnings: bool,
+    minimum_interval_minutes: i64,
+    live_check_interval_seconds: i64,
+    do_not_disturb_start: String,
+    do_not_disturb_end: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ModelSettings {
+    min_training_samples: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct RuntimeSettingsPayload {
+    preferences: UserPreferences,
+    tracking: TrackingSettings,
+    notifications: NotificationSettings,
+    model: ModelSettings,
+}
+
+impl Default for RuntimeSettingsPayload {
+    fn default() -> Self {
+        Self {
+            preferences: UserPreferences {
+                language: "system".to_string(),
+                theme: "system".to_string(),
+                launch_on_startup: false,
+                minimize_to_tray: false,
+                start_minimized: false,
+                current_task_label: "None".to_string(),
+            },
+            tracking: TrackingSettings {
+                idle_threshold_minutes: 5,
+                track_active_window: true,
+                track_window_titles: false,
+                track_keyboard_activity: true,
+                track_mouse_activity: true,
+                excluded_applications: Vec::new(),
+            },
+            notifications: NotificationSettings {
+                break_recommendations: true,
+                performance_warnings: false,
+                minimum_interval_minutes: 30,
+                live_check_interval_seconds: 60,
+                do_not_disturb_start: "23:00".to_string(),
+                do_not_disturb_end: "08:00".to_string(),
+            },
+            model: ModelSettings {
+                min_training_samples: 30,
+            },
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -143,12 +220,40 @@ fn mark_notification_read(id: i64) -> Result<(), String> {
     Ok(())
 }
 
+#[tauri::command]
+fn get_settings() -> Result<RuntimeSettingsPayload, String> {
+    let path = attentionos_settings_path()?;
+    if !path.exists() {
+        return Ok(RuntimeSettingsPayload::default());
+    }
+    let raw = std::fs::read_to_string(path).map_err(|err| err.to_string())?;
+    serde_json::from_str(&raw).or_else(|_| Ok(RuntimeSettingsPayload::default()))
+}
+
+#[tauri::command]
+fn save_settings(settings: RuntimeSettingsPayload) -> Result<(), String> {
+    let path = attentionos_settings_path()?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|err| err.to_string())?;
+    }
+    let raw = serde_json::to_string_pretty(&settings).map_err(|err| err.to_string())?;
+    std::fs::write(path, raw).map_err(|err| err.to_string())
+}
+
 fn attentionos_db_path() -> Result<PathBuf, String> {
     let root = env::var_os("LOCALAPPDATA")
         .or_else(|| env::var_os("APPDATA"))
         .map(PathBuf::from)
         .ok_or_else(|| "LOCALAPPDATA/APPDATA is not available".to_string())?;
     Ok(root.join("AttentionOS").join("attentionos.db"))
+}
+
+fn attentionos_settings_path() -> Result<PathBuf, String> {
+    let root = env::var_os("LOCALAPPDATA")
+        .or_else(|| env::var_os("APPDATA"))
+        .map(PathBuf::from)
+        .ok_or_else(|| "LOCALAPPDATA/APPDATA is not available".to_string())?;
+    Ok(root.join("AttentionOS").join("settings.json"))
 }
 
 fn load_events_for_day(conn: &Connection, date: &str) -> Result<Vec<EventRow>, String> {
@@ -439,7 +544,9 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             get_dashboard,
             get_notifications,
-            mark_notification_read
+            mark_notification_read,
+            get_settings,
+            save_settings
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
