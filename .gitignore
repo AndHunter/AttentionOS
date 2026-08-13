@@ -15,6 +15,11 @@ dist/
 *.egg
 *.spec
 
+# JavaScript / Tauri
+node_modules/
+attentionos-tauri/src-tauri/target/
+attentionos-tauri/dist/
+
 # IDE
 .vscode/
 .idea/

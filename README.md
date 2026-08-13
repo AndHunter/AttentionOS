@@ -128,6 +128,24 @@ The executable is created at:
 dist\AttentionOS.exe
 ```
 
+## Tauri Desktop Shell
+
+The modern React/Tauri shell lives in `attentionos-tauri/`. It reads the same
+local SQLite database at `%LOCALAPPDATA%\AttentionOS\attentionos.db` and presents
+the data-first dashboard, timeline, top apps, recent sessions, and notification
+drawer without changing the existing Python telemetry collector.
+
+```powershell
+cd attentionos-tauri
+npm install
+npm run build
+npm run tauri:dev
+npm run tauri:build
+```
+
+Tauri native builds require Rust plus the Visual Studio C++ build tools workload
+(`Desktop development with C++`, including MSVC `link.exe` and a Windows SDK).
+
 ## Verification
 
 ```powershell

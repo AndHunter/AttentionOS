@@ -1,0 +1,38 @@
+:root {
+  --background: #f6f7f9;
+  --surface: #ffffff;
+  --surface-secondary: #f0f2f5;
+  --border: #e2e5e9;
+  --text: #16181d;
+  --muted: #69707d;
+  --accent: #2f8f83;
+  --accent-soft: #e8f4f2;
+  --warning: #d99a32;
+  --danger: #d95c5c;
+  --shadow: 0 10px 30px rgb(22 24 29 / 0.04);
+  font-family: 'Segoe UI Variable', 'Segoe UI', system-ui, sans-serif;
+  color: var(--text);
+  background: var(--background);
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  min-width: 1000px;
+  min-height: 700px;
+  margin: 0;
+  background: var(--background);
+}
+
+button,
+input,
+select,
+textarea {
+  font: inherit;
+}
