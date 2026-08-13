@@ -337,7 +337,7 @@ fn top_apps(events: &[EventRow], active_seconds: i64) -> Vec<AppUsage> {
 }
 
 fn timeline_segments(events: &[EventRow]) -> Vec<TimelineSegment> {
-    let mut segments = Vec::new();
+    let mut segments: Vec<TimelineSegment> = Vec::new();
     for event in events {
         let start = minute_of_day(&event.ts_start);
         let end = minute_of_day(&event.ts_end).max(start + 1);
