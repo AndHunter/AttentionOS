@@ -7,9 +7,10 @@ import math
 from collections import Counter
 from collections.abc import Sequence
 from datetime import datetime, timedelta
+from typing import TYPE_CHECKING
 
-import numpy as np
-import pandas as pd
+if TYPE_CHECKING:
+    import pandas as pd
 
 from attentionos.sessions.builder import SessionBuilder
 from attentionos.storage.schema import ActivityEvent, Session
@@ -81,8 +82,8 @@ class FeaturePipeline:
         focus_sessions = [s for s in sessions if s.is_focus]
         if focus_sessions:
             durations = [s.duration_seconds for s in focus_sessions]
-            features["mean_focus_block_sec"] = float(np.mean(durations))
-            features["max_focus_block_sec"] = float(np.max(durations))
+            features["mean_focus_block_sec"] = float(sum(durations) / len(durations))
+            features["max_focus_block_sec"] = float(max(durations))
             total_time = sum(s.duration_seconds for s in sessions)
             features["uninterrupted_ratio"] = sum(durations) / max(total_time, 1.0)
         else:
@@ -155,6 +156,9 @@ class FeaturePipeline:
 
         # --- Temporal features ---
         features["hour_of_day"] = at_time.hour
+        hour_fraction = at_time.hour + at_time.minute / 60.0
+        features["hour_sin"] = math.sin(2 * math.pi * hour_fraction / 24.0)
+        features["hour_cos"] = math.cos(2 * math.pi * hour_fraction / 24.0)
         features["weekday"] = at_time.weekday()
 
         # Session age: time since current continuous work block started
@@ -223,6 +227,8 @@ class FeaturePipeline:
         Returns:
             DataFrame with timestamp index and feature columns.
         """
+        import pandas as pd
+
         if not events:
             return pd.DataFrame()
 
@@ -318,6 +324,8 @@ class FeaturePipeline:
             "kb_rate_change_pct": 0.0,
             "mouse_rate_change_pct": 0.0,
             "hour_of_day": at_time.hour,
+            "hour_sin": math.sin(2 * math.pi * (at_time.hour + at_time.minute / 60.0) / 24.0),
+            "hour_cos": math.cos(2 * math.pi * (at_time.hour + at_time.minute / 60.0) / 24.0),
             "weekday": at_time.weekday(),
             "session_age_min": 0.0,
             "work_since_day_start_min": 0.0,

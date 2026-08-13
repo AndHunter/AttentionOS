@@ -132,6 +132,8 @@ class PersonalStateModel:
         "kb_rate_change_pct",
         "mouse_rate_change_pct",
         "hour_of_day",
+        "hour_sin",
+        "hour_cos",
         "weekday",
         "session_age_min",
         "work_since_day_start_min",

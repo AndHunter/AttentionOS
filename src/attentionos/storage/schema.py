@@ -21,6 +21,22 @@ class InterventionType(enum.StrEnum):
     SWITCH_TASK = "switch_task"
 
 
+class NotificationState(enum.StrEnum):
+    """Lifecycle state for in-app notifications."""
+
+    UNREAD = "unread"
+    READ = "read"
+    DISMISSED = "dismissed"
+
+
+class InterventionResponse(enum.StrEnum):
+    """User response to a recommendation."""
+
+    STARTED = "started"
+    SNOOZED = "snoozed"
+    DISMISSED = "dismissed"
+
+
 class ReasonCode(enum.StrEnum):
     """Why the intervention was triggered."""
 
@@ -183,6 +199,39 @@ class Intervention(SQLModel, table=True):
         default=None,
         description="Change in state score after the intervention window.",
     )
+    recommended_duration_minutes: int | None = Field(
+        default=None,
+        ge=0,
+        description="Recommended break duration shown to the user.",
+    )
+    response: InterventionResponse | None = Field(
+        default=None,
+        description="User response to the recommendation.",
+    )
+    snoozed_until: datetime | None = Field(default=None, index=True)
+    dismissed: bool = Field(default=False)
+    break_started_at: datetime | None = Field(default=None)
+    actual_break_duration_minutes: int | None = Field(default=None, ge=0)
+    feedback_after_break: str | None = Field(default=None, max_length=32)
+    model_scores: str | None = Field(
+        default=None,
+        description="JSON scores used by the recommendation policy.",
+    )
+
+
+class Notification(SQLModel, table=True):
+    """User-visible notification stored for the in-app notification center."""
+
+    __tablename__ = "notifications"
+
+    id: int | None = Field(default=None, primary_key=True)
+    created_at: datetime = Field(index=True)
+    title: str = Field(max_length=160)
+    body: str = Field(max_length=1000)
+    state: NotificationState = Field(default=NotificationState.UNREAD, index=True)
+    intervention_id: int | None = Field(default=None, foreign_key="interventions.id")
+    kind: str = Field(default="break_recommendation", max_length=64, index=True)
+    action_payload: str | None = Field(default=None, description="JSON action payload.")
 
 
 class Session(SQLModel, table=True):

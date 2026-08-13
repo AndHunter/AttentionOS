@@ -12,7 +12,14 @@ from sqlmodel import Session as DBSession
 from sqlmodel import SQLModel, create_engine, select
 
 from attentionos.storage.migrations import run_migrations
-from attentionos.storage.schema import ActivityEvent, Intervention, SelfReport, Session
+from attentionos.storage.schema import (
+    ActivityEvent,
+    Intervention,
+    Notification,
+    NotificationState,
+    SelfReport,
+    Session,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -192,6 +199,63 @@ def insert_intervention(
         session.refresh(intervention)
         session.expunge(intervention)
     return intervention
+
+
+def update_intervention(
+    intervention: Intervention, db_path: Path | str | None = None
+) -> Intervention:
+    """Persist updates to an intervention."""
+    with get_session(db_path) as session:
+        merged = session.merge(intervention)
+        session.flush()
+        session.refresh(merged)
+        session.expunge(merged)
+    return merged
+
+
+def get_recent_interventions(
+    limit: int = 20,
+    db_path: Path | str | None = None,
+) -> Sequence[Intervention]:
+    """Retrieve recent interventions newest first."""
+    with get_session(db_path) as session:
+        stmt = select(Intervention).order_by(Intervention.timestamp.desc()).limit(limit)
+        results = session.exec(stmt).all()
+        for item in results:
+            session.expunge(item)
+        return results
+
+
+def insert_notification(
+    notification: Notification, db_path: Path | str | None = None
+) -> Notification:
+    """Insert a notification center record."""
+    with get_session(db_path) as session:
+        session.add(notification)
+        session.flush()
+        session.refresh(notification)
+        session.expunge(notification)
+    return notification
+
+
+def get_notifications(
+    limit: int = 50,
+    db_path: Path | str | None = None,
+) -> Sequence[Notification]:
+    """Retrieve recent notification center items newest first."""
+    with get_session(db_path) as session:
+        stmt = select(Notification).order_by(Notification.created_at.desc()).limit(limit)
+        results = session.exec(stmt).all()
+        for item in results:
+            session.expunge(item)
+        return results
+
+
+def count_unread_notifications(db_path: Path | str | None = None) -> int:
+    """Return unread notification count."""
+    with get_session(db_path) as session:
+        stmt = select(Notification).where(Notification.state == NotificationState.UNREAD)
+        return len(session.exec(stmt).all())
 
 
 # ---------------------------------------------------------------------------

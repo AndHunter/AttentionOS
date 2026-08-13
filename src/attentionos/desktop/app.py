@@ -6,7 +6,9 @@ import logging
 import shutil
 import sys
 import threading
+import time
 import tkinter as tk
+import traceback
 import winreg
 from contextlib import suppress
 from ctypes import windll
@@ -15,6 +17,7 @@ from tkinter import filedialog, messagebox, ttk
 
 from sqlmodel import delete, select
 
+from attentionos.application.recommendations import RecommendationService
 from attentionos.collector.engine import CollectorEngine
 from attentionos.config import AppConfig, get_config
 from attentionos.desktop.components.diagnostics import DiagnosticsDrawer
@@ -24,6 +27,7 @@ from attentionos.desktop.view_model import build_dashboard_snapshot
 from attentionos.desktop.views.dashboard import DashboardView
 from attentionos.desktop.views.settings import SettingsWindow
 from attentionos.localization import Translator
+from attentionos.notifications.windows import WindowsNotifier
 from attentionos.settings import RuntimeSettings, SettingsStore
 from attentionos.storage.db import get_daily_events, get_session, init_db, insert_self_report
 from attentionos.storage.schema import ActivityEvent, SelfReport
@@ -53,6 +57,9 @@ class AttentionOSDesktopApp(tk.Tk):
         self.collector: CollectorEngine | None = None
         self.collector_thread: threading.Thread | None = None
         self.collector_error: str | None = None
+        self.recommendations = RecommendationService(self.config, self.runtime_settings)
+        self.notifier = WindowsNotifier()
+        self._last_recommendation_check = 0.0
         self.diagnostics: DiagnosticsDrawer | None = None
         self.settings_window: SettingsWindow | None = None
         self.self_report_window: SelfReportDialog | None = None
@@ -292,6 +299,7 @@ class AttentionOSDesktopApp(tk.Tk):
         self._apply_startup_setting(settings.preferences.launch_on_startup)
         if was_tracking and self.collector is not None:
             self.collector.update_runtime_settings(settings)
+        self.recommendations.update_settings(settings)
         self.translator.set_language(settings.preferences.language)
         apply_color_theme(self._effective_theme())
         self.no_task_label = self.translator.t("table.no_task")
@@ -386,7 +394,26 @@ class AttentionOSDesktopApp(tk.Tk):
         self._update_tracking_status()
         self._update_diagnostics()
         self._refresh_dashboard()
+        self._run_recommendation_check()
         self.after(3000, self._tick)
+
+    def _run_recommendation_check(self) -> None:
+        active = self.collector_thread is not None and self.collector_thread.is_alive()
+        if not active:
+            return
+        now = time.monotonic()
+        interval = self.runtime_settings.notifications.live_check_interval_seconds
+        if now - self._last_recommendation_check < interval:
+            return
+        self._last_recommendation_check = now
+        try:
+            result = self.recommendations.evaluate_now()
+        except Exception:
+            logger.exception("Recommendation evaluation failed.")
+            return
+        if result is None or result.notification is None:
+            return
+        self.notifier.show(result.notification.title, result.notification.body)
 
     def _update_tracking_status(self) -> None:
         active = self.collector_thread is not None and self.collector_thread.is_alive()
@@ -445,9 +472,15 @@ def _setup_desktop_logging(config: AppConfig) -> None:
 def main() -> None:
     """Launch the native desktop app."""
     config = get_config()
-    _setup_desktop_logging(config)
-    app = AttentionOSDesktopApp(config)
-    app.mainloop()
+    try:
+        _setup_desktop_logging(config)
+        app = AttentionOSDesktopApp(config)
+        app.mainloop()
+    except Exception:
+        config.ensure_dirs()
+        crash_path = config.log_path.parent / "crash.log"
+        crash_path.write_text(traceback.format_exc(), encoding="utf-8")
+        raise
 
 
 if __name__ == "__main__":

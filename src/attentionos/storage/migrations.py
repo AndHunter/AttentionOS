@@ -11,7 +11,7 @@ from datetime import UTC, datetime
 
 from sqlalchemy import inspect, text
 
-CURRENT_SCHEMA_VERSION = 2
+CURRENT_SCHEMA_VERSION = 3
 
 
 def run_migrations(engine) -> None:
@@ -27,6 +27,7 @@ def run_migrations(engine) -> None:
         )
     _ensure_self_report_columns(engine)
     _ensure_intervention_columns(engine)
+    _ensure_notification_table(engine)
     _set_schema_version(engine, CURRENT_SCHEMA_VERSION)
 
 
@@ -46,8 +47,46 @@ def _ensure_intervention_columns(engine) -> None:
         "pre_state": "TEXT",
         "post_report_id": "INTEGER",
         "completed": "BOOLEAN NOT NULL DEFAULT 0",
+        "recommended_duration_minutes": "INTEGER",
+        "response": "VARCHAR(32)",
+        "snoozed_until": "DATETIME",
+        "dismissed": "BOOLEAN NOT NULL DEFAULT 0",
+        "break_started_at": "DATETIME",
+        "actual_break_duration_minutes": "INTEGER",
+        "feedback_after_break": "VARCHAR(32)",
+        "model_scores": "TEXT",
     }
     _add_missing_columns(engine, "interventions", columns, additions)
+
+
+def _ensure_notification_table(engine) -> None:
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                "CREATE TABLE IF NOT EXISTS notifications ("
+                "id INTEGER PRIMARY KEY, "
+                "created_at DATETIME NOT NULL, "
+                "title VARCHAR(160) NOT NULL, "
+                "body VARCHAR(1000) NOT NULL, "
+                "state VARCHAR(16) NOT NULL DEFAULT 'unread', "
+                "intervention_id INTEGER, "
+                "kind VARCHAR(64) NOT NULL DEFAULT 'break_recommendation', "
+                "action_payload TEXT, "
+                "FOREIGN KEY(intervention_id) REFERENCES interventions(id))"
+            )
+        )
+        conn.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS "
+                "ix_notifications_created_at ON notifications(created_at)"
+            )
+        )
+        conn.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS "
+                "ix_notifications_state ON notifications(state)"
+            )
+        )
 
 
 def _columns(engine, table: str) -> set[str]:
