@@ -12,6 +12,12 @@ use tauri::{AppHandle, Manager};
 use winreg::enums::HKEY_CURRENT_USER;
 use winreg::RegKey;
 
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
+
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x08000000;
+
 struct CollectorProcess {
     child: Mutex<Option<Child>>,
 }
@@ -270,11 +276,15 @@ fn start_tracking(state: tauri::State<'_, CollectorProcess>) -> Result<(), Strin
             return Ok(());
         }
     }
-    let child = Command::new("python")
+    let mut command = Command::new("python");
+    command
         .args(["-m", "attentionos.collector.engine"])
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stderr(Stdio::null());
+    #[cfg(windows)]
+    command.creation_flags(CREATE_NO_WINDOW);
+    let child = command
         .spawn()
         .map_err(|err| format!("Could not start collector via Python: {err}"))?;
     *guard = Some(child);
