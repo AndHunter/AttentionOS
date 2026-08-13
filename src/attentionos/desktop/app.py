@@ -59,7 +59,7 @@ class AttentionOSDesktopApp(tk.Tk):
         self.dashboard: DashboardView | None = None
         self._build_dashboard()
         if self.runtime_settings.preferences.start_minimized:
-            self.withdraw()
+            self.after(250, self.iconify)
         self._refresh_dashboard()
         self.after(1000, self._tick)
         self.protocol("WM_DELETE_WINDOW", self._on_close)
