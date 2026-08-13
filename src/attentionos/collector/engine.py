@@ -12,7 +12,7 @@ from attentionos.collector.foreground import ForegroundTracker
 from attentionos.collector.idle import IdleTracker
 from attentionos.collector.input_activity import InputCounter
 from attentionos.config import AppConfig, get_config
-from attentionos.settings import RuntimeSettings
+from attentionos.settings import RuntimeSettings, SettingsStore
 from attentionos.storage.db import init_db, insert_events_batch
 from attentionos.storage.schema import ActivityEvent
 
@@ -302,7 +302,10 @@ def main() -> None:
     logger.info("Database: %s", config.db_path)
     logger.info("=" * 60)
 
-    engine = CollectorEngine(config)
+    runtime_settings = SettingsStore(config.data_dir / "settings.json").load()
+    engine = CollectorEngine(config, runtime_settings)
+    task_label = runtime_settings.preferences.current_task_label
+    engine.set_task_label(None if task_label == "None" else task_label)
     engine.run()
 
 

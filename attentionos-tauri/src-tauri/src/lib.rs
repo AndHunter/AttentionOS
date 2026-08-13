@@ -4,11 +4,17 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::env;
 use std::path::PathBuf;
+use std::process::{Child, Command, Stdio};
+use std::sync::Mutex;
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{AppHandle, Manager};
 use winreg::enums::HKEY_CURRENT_USER;
 use winreg::RegKey;
+
+struct CollectorProcess {
+    child: Mutex<Option<Child>>,
+}
 
 #[derive(Debug, Serialize)]
 struct Metric {
@@ -254,6 +260,48 @@ fn save_settings(app: AppHandle, settings: RuntimeSettingsPayload) -> Result<(),
     std::fs::write(path, raw).map_err(|err| err.to_string())?;
     apply_startup_setting(&app, settings.preferences.launch_on_startup)?;
     Ok(())
+}
+
+#[tauri::command]
+fn start_tracking(state: tauri::State<'_, CollectorProcess>) -> Result<(), String> {
+    let mut guard = state.child.lock().map_err(|err| err.to_string())?;
+    if let Some(child) = guard.as_mut() {
+        if child.try_wait().map_err(|err| err.to_string())?.is_none() {
+            return Ok(());
+        }
+    }
+    let child = Command::new("python")
+        .args(["-m", "attentionos.collector.engine"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|err| format!("Could not start collector via Python: {err}"))?;
+    *guard = Some(child);
+    Ok(())
+}
+
+#[tauri::command]
+fn stop_tracking(state: tauri::State<'_, CollectorProcess>) -> Result<(), String> {
+    let mut guard = state.child.lock().map_err(|err| err.to_string())?;
+    if let Some(child) = guard.as_mut() {
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+    *guard = None;
+    Ok(())
+}
+
+#[tauri::command]
+fn get_tracking_status(state: tauri::State<'_, CollectorProcess>) -> Result<bool, String> {
+    let mut guard = state.child.lock().map_err(|err| err.to_string())?;
+    if let Some(child) = guard.as_mut() {
+        if child.try_wait().map_err(|err| err.to_string())?.is_none() {
+            return Ok(true);
+        }
+    }
+    *guard = None;
+    Ok(false)
 }
 
 #[tauri::command]
@@ -701,6 +749,9 @@ fn recent_sessions(events: &[TimedEvent<'_>]) -> Vec<RecentSession> {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .manage(CollectorProcess {
+            child: Mutex::new(None),
+        })
         .setup(|app| {
             if cfg!(debug_assertions) {
                 app.handle().plugin(
@@ -766,6 +817,9 @@ pub fn run() {
             mark_notification_read,
             get_settings,
             save_settings,
+            start_tracking,
+            stop_tracking,
+            get_tracking_status,
             export_data,
             delete_telemetry,
             delete_self_reports,

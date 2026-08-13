@@ -102,6 +102,63 @@
   margin-bottom: 16px;
 }
 
+.tracking-card {
+  display: grid;
+  grid-template-columns: auto minmax(220px, 0.8fr) minmax(260px, 1fr) auto auto;
+  gap: 12px;
+  align-items: end;
+  margin-bottom: 16px;
+  padding: 16px;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: var(--surface);
+  box-shadow: var(--shadow);
+}
+
+.tracking-status {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 38px;
+}
+
+.pulse-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 999px;
+  background: var(--muted);
+}
+
+.pulse-dot.active {
+  background: var(--accent);
+  box-shadow: 0 0 0 6px color-mix(in srgb, var(--accent) 16%, transparent);
+}
+
+.task-select {
+  display: grid;
+  gap: 6px;
+}
+
+.task-select span {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.task-select select,
+.task-add input {
+  min-height: 38px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface-secondary);
+  color: var(--text);
+  padding: 8px 10px;
+}
+
+.task-add {
+  align-self: end;
+}
+
 .state-card,
 .metric-card,
 .panel {
@@ -639,5 +696,9 @@
 
   .metrics-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .tracking-card {
+    grid-template-columns: 1fr 1fr;
   }
 }
