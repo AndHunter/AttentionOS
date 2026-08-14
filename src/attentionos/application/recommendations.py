@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import logging
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, time, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -69,8 +69,8 @@ class RecommendationService:
             return None
 
         now = _naive_utc(at_time or datetime.now(tz=UTC))
-        lookback_start = now - timedelta(hours=6)
-        events = list(get_events_range(lookback_start, now, self.config.db_path))
+        day_start = _local_day_start_as_utc_naive(at_time)
+        events = list(get_events_range(day_start, now, self.config.db_path))
         if not events:
             return None
 
@@ -155,3 +155,10 @@ def _naive_utc(value: datetime) -> datetime:
     if value.tzinfo is None:
         return value
     return value.astimezone(UTC).replace(tzinfo=None)
+
+
+def _local_day_start_as_utc_naive(value: datetime | None = None) -> datetime:
+    """Return local PC day start converted to the naive UTC format used in SQLite."""
+    local_now = (value or datetime.now()).astimezone() if (value or datetime.now()).tzinfo else datetime.now().astimezone()
+    local_start = datetime.combine(local_now.date(), time.min).astimezone()
+    return local_start.astimezone(UTC).replace(tzinfo=None)

@@ -299,6 +299,41 @@ fn evaluate_recommendations() -> Result<Vec<NotificationPayload>, String> {
 }
 
 #[tauri::command]
+fn create_test_notification() -> Result<NotificationPayload, String> {
+    let db_path = attentionos_db_path()?;
+    let conn = Connection::open(db_path).map_err(|err| err.to_string())?;
+    let now_utc = chrono::Utc::now().naive_utc().to_string();
+    conn.execute(
+        "INSERT INTO notifications (
+            created_at,
+            title,
+            body,
+            state,
+            intervention_id,
+            kind,
+            action_payload
+        ) VALUES (?1, ?2, ?3, 'unread', NULL, 'system_test', ?4)",
+        params![
+            now_utc,
+            "AttentionOS test",
+            "Test notification from AttentionOS. If you see this, notifications are connected.",
+            "{\"source\":\"tauri-test\"}",
+        ],
+    )
+    .map_err(|err| err.to_string())?;
+    let id = conn.last_insert_rowid();
+    Ok(NotificationPayload {
+        id,
+        created_at: now_utc,
+        title: "AttentionOS test".to_string(),
+        body: "Test notification from AttentionOS. If you see this, notifications are connected."
+            .to_string(),
+        state: "unread".to_string(),
+        kind: "system_test".to_string(),
+    })
+}
+
+#[tauri::command]
 fn get_settings() -> Result<RuntimeSettingsPayload, String> {
     let path = attentionos_settings_path()?;
     if !path.exists() {
@@ -964,7 +999,11 @@ pub fn run() {
             let show = MenuItem::with_id(app, "show", "Show AttentionOS", true, None::<&str>)?;
             let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
             let menu = Menu::with_items(app, &[&show, &quit])?;
-            TrayIconBuilder::with_id("attentionos")
+            let mut tray_builder = TrayIconBuilder::with_id("attentionos");
+            if let Some(icon) = app.default_window_icon() {
+                tray_builder = tray_builder.icon(icon.clone());
+            }
+            tray_builder
                 .tooltip("AttentionOS")
                 .menu(&menu)
                 .show_menu_on_left_click(false)
@@ -1013,6 +1052,7 @@ pub fn run() {
             mark_notification_read,
             save_self_report,
             evaluate_recommendations,
+            create_test_notification,
             get_settings,
             save_settings,
             start_tracking,
