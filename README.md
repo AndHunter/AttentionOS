@@ -68,7 +68,72 @@ attentionos/
 - Structured JSON/CSV export for analysis and ML preparation.
 - Safe SQLite migrations with schema versioning.
 
-## ML Approach
+## Demo ML System
+
+AttentionOS includes a synthetic-data demo model to demonstrate the intended
+end-to-end personalization pipeline:
+
+```text
+Telemetry
+        ↓
+Rolling features
+        ↓
+Personal baseline
+        ↓
+CatBoost demo models
+        ↓
+Current effectiveness estimate
+        ↓
+Decline risk
+        ↓
+Break benefit / recommendation
+        ↓
+UI
+```
+
+**Demo model trained on synthetic data.**
+
+**Демо-модель обучена на синтетических данных.**
+
+Synthetic data is generated separately from the production SQLite database and is
+stored under `data/demo/`:
+
+```text
+synthetic_telemetry.parquet
+synthetic_reports.parquet
+synthetic_interventions.parquet
+synthetic_training_dataset.parquet
+```
+
+Synthetic metrics must not be interpreted as real-world validation. The demo
+model does not diagnose fatigue, is not medically validated, and does not prove
+quality on real users. It is a bootstrap experience for the future personal
+model, which will require longitudinal real telemetry and enough self-reports.
+
+CLI:
+
+```powershell
+python -m attentionos.ml.synthetic.generate --users 1000 --days 60 --seed 42
+python -m attentionos.ml.train_demo
+python -m attentionos.ml.evaluate_demo
+python -m attentionos.ml.demo_sanity_check
+python -m attentionos.ml.demo.inference
+```
+
+Models are saved under:
+
+```text
+models/demo/
+  effectiveness.cbm
+  decline.cbm
+  break_benefit.cbm
+  metadata.json
+```
+
+The Tauri dashboard displays demo predictions only with a visible `DEMO` badge
+and the synthetic-data disclaimer.
+
+## Personal ML Approach
 
 The first real ML task is:
 
@@ -81,9 +146,9 @@ The initial model family is intentionally simple: dummy baseline, Ridge regressi
 RandomForest, and HistGradientBoosting with chronological validation. No random
 train/test split is used for time-dependent data.
 
-AttentionOS does not show synthetic predictions in the production UI. Until enough
-self-report samples exist, model status remains `Collecting data`, estimated
-performance remains `Learning`, and decline risk remains `Not enough data`.
+Until enough real self-report samples exist, personal model status remains
+`Collecting data`. Future versions can train a personal model from real
+longitudinal data, separate from the synthetic demo model.
 
 ## Privacy
 

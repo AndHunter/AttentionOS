@@ -299,6 +299,29 @@ fn evaluate_recommendations() -> Result<Vec<NotificationPayload>, String> {
 }
 
 #[tauri::command]
+fn get_demo_ml_prediction() -> Result<serde_json::Value, String> {
+    let mut command = python_collector_command()?;
+    command
+        .args(["-m", "attentionos.ml.demo.inference"])
+        .stdin(Stdio::null())
+        .stderr(Stdio::from(open_collector_log("demo_ml_stderr.log")?))
+        .env("PYTHONUTF8", "1");
+    #[cfg(windows)]
+    command.creation_flags(CREATE_NO_WINDOW);
+    let output = command
+        .output()
+        .map_err(|err| format!("Could not run demo ML inference: {err}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "Demo ML inference exited with status {}. {}",
+            output.status,
+            demo_ml_stderr_tail()
+        ));
+    }
+    serde_json::from_slice(&output.stdout).map_err(|err| err.to_string())
+}
+
+#[tauri::command]
 fn create_test_notification() -> Result<NotificationPayload, String> {
     let db_path = attentionos_db_path()?;
     let conn = Connection::open(db_path).map_err(|err| err.to_string())?;
@@ -581,6 +604,30 @@ fn run_recommendation_service() -> Result<(), String> {
 
 fn recommendation_stderr_tail() -> String {
     let Ok(path) = attentionos_data_dir().map(|dir| dir.join("recommendations_stderr.log")) else {
+        return String::new();
+    };
+    let Ok(mut file) = File::open(path) else {
+        return String::new();
+    };
+    let mut raw = String::new();
+    let _ = file.read_to_string(&mut raw);
+    let tail = raw
+        .chars()
+        .rev()
+        .take(1200)
+        .collect::<String>()
+        .chars()
+        .rev()
+        .collect::<String>();
+    if tail.trim().is_empty() {
+        String::new()
+    } else {
+        format!("stderr: {tail}")
+    }
+}
+
+fn demo_ml_stderr_tail() -> String {
+    let Ok(path) = attentionos_data_dir().map(|dir| dir.join("demo_ml_stderr.log")) else {
         return String::new();
     };
     let Ok(mut file) = File::open(path) else {
@@ -1052,6 +1099,7 @@ pub fn run() {
             mark_notification_read,
             save_self_report,
             evaluate_recommendations,
+            get_demo_ml_prediction,
             create_test_notification,
             get_settings,
             save_settings,

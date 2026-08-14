@@ -47,6 +47,8 @@ catboost_info/
 data/models/
 data/raw/
 data/processed/
+data/demo_test/
+models/demo_test/
 models/*.pkl
 models/*.cbm
 models/*.joblib

@@ -28,6 +28,22 @@ type RuntimeSettings = {
   model: { min_training_samples: number }
 }
 type UiText = typeof en
+type DemoPrediction = {
+  mode: string
+  status: 'ready' | 'warmup'
+  reason?: string
+  disclaimer?: string
+  disclaimer_ru?: string
+  model_version?: string
+  current_effectiveness?: number
+  decline_probability?: number
+  break_benefit?: number
+  active_minutes?: number
+  latency_ms?: number
+  recommendation?: { action: string; title: string; reason: string; confidence: number }
+  signals?: { name: string; value: number }[]
+  metadata?: { samples?: number; metrics?: Record<string, Record<string, number>>; feature_importance?: Record<string, number> }
+}
 
 const palette = ['#2F8F83', '#4D7EA8', '#7A6FBC', '#B8794A', '#4E937A', '#8C6A56', '#68758E']
 const defaultTasks = ['Coding', 'ML', 'Math', 'English', 'Rest', 'Meeting', 'Admin', 'Other']
@@ -61,6 +77,14 @@ const ru = {
   close: '\u0417\u0430\u043a\u0440\u044b\u0442\u044c',
   exported: '\u042d\u043a\u0441\u043f\u043e\u0440\u0442',
   deleted: '\u0423\u0434\u0430\u043b\u0435\u043d\u043e',
+  demo: 'DEMO',
+  demoModel: '\u0414\u0435\u043c\u043e-ML',
+  demoDisclaimer: '\u0414\u0435\u043c\u043e-\u043c\u043e\u0434\u0435\u043b\u044c \u043e\u0431\u0443\u0447\u0435\u043d\u0430 \u043d\u0430 \u0441\u0438\u043d\u0442\u0435\u0442\u0438\u0447\u0435\u0441\u043a\u0438\u0445 \u0434\u0430\u043d\u043d\u044b\u0445.',
+  declineRisk: '\u0420\u0438\u0441\u043a \u0441\u043d\u0438\u0436\u0435\u043d\u0438\u044f',
+  effectiveness: '\u042d\u0444\u0444\u0435\u043a\u0442\u0438\u0432\u043d\u043e\u0441\u0442\u044c',
+  breakBenefit: '\u041f\u043e\u043b\u044c\u0437\u0430 \u043f\u0435\u0440\u0435\u0440\u044b\u0432\u0430',
+  recommendation: '\u0420\u0435\u043a\u043e\u043c\u0435\u043d\u0434\u0430\u0446\u0438\u044f',
+  collectingData: '\u0421\u0431\u043e\u0440 \u0434\u0430\u043d\u043d\u044b\u0445',
   loading: '\u0417\u0430\u0433\u0440\u0443\u0437\u043a\u0430',
   refresh: '\u041e\u0431\u043d\u043e\u0432\u0438\u0442\u044c',
   unassigned: '\u0411\u0435\u0437 \u0437\u0430\u0434\u0430\u0447\u0438',
@@ -91,6 +115,8 @@ const en = {
   duration: 'Duration', task: 'Task', currentTask: 'Current task', addTask: 'Add', startTracking: 'Start tracking',
   stopTracking: 'Stop', tracking: 'Tracking', stopped: 'Stopped', checkIn: 'Check in', save: 'Save', close: 'Close',
   exported: 'Exported', deleted: 'Deleted',
+  demo: 'DEMO', demoModel: 'Demo ML', demoDisclaimer: 'Demo model trained on synthetic data.',
+  declineRisk: 'Decline risk', effectiveness: 'Effectiveness', breakBenefit: 'Break benefit', recommendation: 'Recommendation', collectingData: 'Collecting data',
   loading: 'Loading', refresh: 'Refresh', unassigned: 'Unassigned', focused: 'Focused', active: 'Active', switches: 'Switches', noAppUsage: 'No app usage yet.',
   notificationHint: 'Break recommendations and system notes.', noNotifications: 'No notifications', notificationEmptyText: 'Recommendations will appear here and in Windows.',
   settingsSubtitle: 'Editable runtime preferences used by the collector.',
@@ -134,6 +160,7 @@ function App() {
   const [dashboard, setDashboard] = useState<DashboardPayload | null>(null)
   const [notifications, setNotifications] = useState<NotificationPayload[]>([])
   const [settings, setSettings] = useState<RuntimeSettings | null>(null)
+  const [demoPrediction, setDemoPrediction] = useState<DemoPrediction | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [notificationsOpen, setNotificationsOpen] = useState(false)
@@ -148,13 +175,14 @@ function App() {
   async function refresh(target = date) {
     setLoading(true); setError(null)
     try {
-      const [dash, notes, runtime, active] = await Promise.all([
+      const [dash, notes, runtime, active, demo] = await Promise.all([
         invoke<DashboardPayload>('get_dashboard', { date: target }),
         invoke<NotificationPayload[]>('get_notifications', { limit: 8 }),
         invoke<RuntimeSettings>('get_settings'),
         invoke<boolean>('get_tracking_status'),
+        invoke<DemoPrediction>('get_demo_ml_prediction'),
       ])
-      setDashboard(dash); setNotifications(notes); setSettings(runtime); setTracking(active); setSelectedSegment(dash.timeline.at(-1) ?? null)
+      setDashboard(applyDemoMetric(dash, demo)); setNotifications(notes); setSettings(runtime); setTracking(active); setDemoPrediction(demo); setSelectedSegment(dash.timeline.at(-1) ?? null)
     } catch (err) { setError(err instanceof Error ? err.message : String(err)) } finally { setLoading(false) }
   }
 
@@ -205,12 +233,13 @@ function App() {
       <header className="topbar"><div><div className="brand">AttentionOS</div><div className="subtle">{t.subtitle}</div></div><div className="topbar-actions"><span className="privacy-pill">{t.localOnly}</span><button type="button" className="icon-button" onClick={() => refresh()} aria-label="Refresh">R</button><button type="button" className="button ghost" onClick={() => setNotificationsOpen(true)}>{t.notifications}{unreadCount > 0 && <span className="badge">{unreadCount}</span>}</button><button type="button" className="button ghost" onClick={() => setSettingsOpen(true)}>{t.settings}</button></div></header>
       {error && <div className="error">Could not load AttentionOS data: {error}</div>}
       <section className="tracking-card"><div className="tracking-status"><span className={tracking ? 'pulse-dot active' : 'pulse-dot'} /><strong>{tracking ? t.tracking : t.stopped}</strong></div><label className="task-select"><span>{t.currentTask}</span><select value={settings?.preferences.current_task_label ?? 'None'} onChange={(e) => setCurrentTask(e.target.value)}>{taskOptions.map((task) => <option value={task} key={task}>{task}</option>)}</select></label><div className="inline-input task-add"><input value={customTask} onChange={(e) => setCustomTask(e.target.value)} placeholder={t.addTask} /><button type="button" onClick={addTask}>{t.actions.add}</button></div><button type="button" className={`button ${tracking ? 'danger' : 'primary'}`} onClick={toggleTracking}>{tracking ? t.stopTracking : t.startTracking}</button><button type="button" className="button" onClick={() => setSelfReportOpen(true)}>{t.checkIn}</button></section>
-      <section className="hero-grid"><article className="state-card"><div className="eyebrow">{translateMetric(dashboard?.current_state.label ?? t.currentState, lang(settings))}</div><h1>{loading ? t.loading : translateState(dashboard?.current_state.value ?? '-', lang(settings))}</h1><p>{translateMetricDetail(dashboard?.current_state.detail ?? '', lang(settings))}</p><div className="state-meta"><span>{formatDate(date, lang(settings))}</span><span>{dashboard?.event_count ?? 0} {lang(settings) === 'ru' ? '\u0441\u043e\u0431\u044b\u0442\u0438\u0439' : 'events'}</span></div></article><div className="metrics-grid">{(dashboard?.metrics ?? []).map((m) => <article className="metric-card" key={m.label}><div className="metric-label">{translateMetric(m.label, lang(settings))}</div><div className="metric-value">{m.value}</div><div className="metric-detail">{translateMetricDetail(m.detail, lang(settings))}</div></article>)}</div></section>
+      <section className="hero-grid"><article className="state-card"><div className="eyebrow">{translateMetric(dashboard?.current_state.label ?? t.currentState, lang(settings))} <span className="demo-badge" title={t.demoDisclaimer}>{t.demo}</span></div><h1>{loading ? t.loading : demoStateTitle(demoPrediction, lang(settings), dashboard?.current_state.value)}</h1><p>{demoPrediction?.status === 'ready' ? t.demoDisclaimer : translateMetricDetail(dashboard?.current_state.detail ?? '', lang(settings))}</p><div className="state-meta"><span>{formatDate(date, lang(settings))}</span><span>{dashboard?.event_count ?? 0} {lang(settings) === 'ru' ? '\u0441\u043e\u0431\u044b\u0442\u0438\u0439' : 'events'}</span></div></article><div className="metrics-grid">{(dashboard?.metrics ?? []).map((m) => <article className="metric-card" key={m.label}><div className="metric-label">{translateMetric(m.label, lang(settings))}</div><div className="metric-value">{m.value}</div><div className="metric-detail">{translateMetricDetail(m.detail, lang(settings))}</div></article>)}</div></section>
+      {demoPrediction && <section className="panel demo-panel"><div className="panel-header"><div><h2>{t.demoModel} <span className="demo-badge" title={t.demoDisclaimer}>{t.demo}</span></h2><p>{t.demoDisclaimer}</p></div><strong>{demoPrediction.model_version ?? 'demo-v1'}</strong></div><div className="demo-grid"><MetricPill label={t.effectiveness} value={demoPrediction.status === 'ready' ? `${demoPrediction.current_effectiveness?.toFixed(1)}/5` : t.collectingData} /><MetricPill label={t.declineRisk} value={demoPrediction.status === 'ready' ? `${Math.round((demoPrediction.decline_probability ?? 0) * 100)}%` : `${Math.round(demoPrediction.active_minutes ?? 0)}m`} /><MetricPill label={t.breakBenefit} value={demoPrediction.status === 'ready' ? `${Math.round((demoPrediction.break_benefit ?? 0) * 100)}%` : '-'} /><MetricPill label={t.recommendation} value={localizeDemoAction(demoPrediction.recommendation?.action ?? 'CONTINUE', lang(settings))} /></div>{demoPrediction.signals && <div className="signal-list">{demoPrediction.signals.slice(0, 5).map((signal) => <span key={signal.name}>{localizeSignal(signal.name, lang(settings))}: {signal.value}</span>)}</div>}</section>}
       <section className="panel timeline-panel"><div className="panel-header"><div><h2>{t.timeline}</h2><p>{t.timelineHint}</p></div><div className="date-nav"><button type="button" onClick={() => setDate(shiftDate(date, -1))}>{'<'}</button><span>{date === todayIso() ? t.today : formatDate(date, lang(settings))}</span><button type="button" onClick={() => setDate(shiftDate(date, 1))}>{'>'}</button></div></div>{dashboard && dashboard.timeline.length > 0 ? <div className="timeline"><div className="timeline-track">{dashboard.timeline.map((segment, index) => { const dayStart = 9 * 60; const dayEnd = 18 * 60; const start = Math.max(segment.start_minute, dayStart); const end = Math.min(segment.end_minute, dayEnd); if (end <= dayStart || start >= dayEnd) return null; const left = ((start - dayStart) / (dayEnd - dayStart)) * 100; const width = Math.max(((end - start) / (dayEnd - dayStart)) * 100, 0.8); const selected = selectedSegment?.app === segment.app && selectedSegment?.start_minute === segment.start_minute; return <button type="button" className={`timeline-segment ${selected ? 'selected' : ''}`} key={`${segment.app}-${segment.start_minute}-${index}`} style={{ left: `${left}%`, width: `${width}%`, background: appColor.get(segment.app) }} title={`${segment.app} - ${formatMinutes(segment.duration_minutes)}`} onClick={() => setSelectedSegment(segment)} onMouseEnter={() => setSelectedSegment(segment)} /> })}</div><div className="timeline-axis"><span>09:00</span><span>12:00</span><span>15:00</span><span>18:00</span></div>{selectedSegment && <div className="timeline-detail"><strong>{selectedSegment.app}</strong><span>{formatClock(selectedSegment.start_minute)}-{formatClock(selectedSegment.end_minute)}</span><span>{formatMinutes(selectedSegment.duration_minutes)}</span><span>{t.task}: {selectedSegment.task ?? t.unassigned}</span></div>}</div> : <div className="empty-state"><h3>{t.noData}</h3><p>{t.noDataText}</p></div>}</section>
       <section className="analytics-grid"><article className="panel"><div className="panel-header"><div><h2>{t.activityPattern}</h2><p>{lang(settings) === 'ru' ? '\u0424\u043e\u043a\u0443\u0441 \u0438 \u0430\u043a\u0442\u0438\u0432\u043d\u043e\u0435 \u0432\u0440\u0435\u043c\u044f.' : 'Focused vs active minutes.'}</p></div></div><div className="bar-comparison"><Bar label="Focused" value={dashboard?.focused_minutes ?? 0} max={dashboard?.active_minutes ?? 1} lang={lang(settings)} /><Bar label="Active" value={dashboard?.active_minutes ?? 0} max={dashboard?.active_minutes ?? 1} lang={lang(settings)} /><Bar label="Switches" value={dashboard?.context_switches ?? 0} max={Math.max(dashboard?.context_switches ?? 0, 40)} lang={lang(settings)} /></div></article><article className="panel"><div className="panel-header"><div><h2>{t.topApps}</h2><p>{lang(settings) === 'ru' ? '\u041f\u043e \u0430\u043a\u0442\u0438\u0432\u043d\u043e\u043c\u0443 \u0432\u0440\u0435\u043c\u0435\u043d\u0438.' : 'Ranked by active foreground time.'}</p></div></div><div className="app-list">{(dashboard?.top_apps ?? []).length > 0 ? dashboard?.top_apps.map((app, index) => <div className="app-row" key={app.name}><span className="rank">{index + 1}</span><span className="app-name">{app.name}</span><span>{formatMinutes(app.duration_minutes)}</span><div className="progress"><span style={{ width: `${app.percent}%` }} /></div></div>) : <p className="muted">{t.noAppUsage}</p>}</div></article></section>
       <section className="panel"><div className="panel-header"><div><h2>{t.recentSessions}</h2><p>{lang(settings) === 'ru' ? '\u041f\u043e\u0441\u043b\u0435\u0434\u043d\u0438\u0435 \u0431\u043b\u043e\u043a\u0438 \u0440\u0430\u0431\u043e\u0442\u044b.' : 'Latest foreground work blocks.'}</p></div><span className="muted">SQLite: {dashboard?.db_path}</span></div><div className="sessions-table"><div className="table-head"><span>{t.time}</span><span>{t.app}</span><span>{t.duration}</span><span>{t.task}</span></div>{(dashboard?.recent_sessions ?? []).map((s) => <div className="table-row" key={`${s.time}-${s.application}-${s.duration_minutes}`}><span>{s.time}</span><span>{s.application}</span><span>{formatMinutes(s.duration_minutes)}</span><span>{s.task ?? t.unassigned}</span></div>)}</div></section>
       {notificationsOpen && <NotificationsDrawer notifications={notifications} markRead={markRead} close={() => setNotificationsOpen(false)} t={t} />}
-      {settingsOpen && settings && <SettingsModal dashboard={dashboard} settings={settings} unreadCount={unreadCount} ui={t} onClose={() => setSettingsOpen(false)} onTestNotification={sendTestNotification} onSave={async (next) => { await saveRuntimeSettings(next); setSettingsOpen(false); await refresh() }} />}
+      {settingsOpen && settings && <SettingsModal dashboard={dashboard} demoPrediction={demoPrediction} settings={settings} unreadCount={unreadCount} ui={t} onClose={() => setSettingsOpen(false)} onTestNotification={sendTestNotification} onSave={async (next) => { await saveRuntimeSettings(next); setSettingsOpen(false); await refresh() }} />}
       {selfReportOpen && settings && <SelfReportModal settings={settings} ui={t} onClose={() => setSelfReportOpen(false)} onSaved={async () => { setSelfReportOpen(false); await refresh() }} />}
     </main>
   )
@@ -225,7 +254,11 @@ function Bar({ label, value, max, lang }: { label: string; value: number; max: n
   return <div className="bar-row"><div><span>{translateMetric(label, lang)}</span><strong>{label === 'Switches' ? value : formatMinutes(value)}</strong></div><div className="bar-track"><span style={{ width: `${Math.min((value / Math.max(max, 1)) * 100, 100)}%` }} /></div></div>
 }
 
-function SettingsModal({ dashboard, settings, unreadCount, ui, onClose, onTestNotification, onSave }: { dashboard: DashboardPayload | null; settings: RuntimeSettings; unreadCount: number; ui: UiText; onClose: () => void; onTestNotification: () => Promise<void>; onSave: (settings: RuntimeSettings) => Promise<void> }) {
+function MetricPill({ label, value }: { label: string; value: string }) {
+  return <div className="metric-pill"><span>{label}</span><strong>{value}</strong></div>
+}
+
+function SettingsModal({ dashboard, demoPrediction, settings, unreadCount, ui, onClose, onTestNotification, onSave }: { dashboard: DashboardPayload | null; demoPrediction: DemoPrediction | null; settings: RuntimeSettings; unreadCount: number; ui: UiText; onClose: () => void; onTestNotification: () => Promise<void>; onSave: (settings: RuntimeSettings) => Promise<void> }) {
   const [tab, setTab] = useState('general')
   const [draft, setDraft] = useState<RuntimeSettings>(structuredClone(settings))
   const [excludedInput, setExcludedInput] = useState('')
@@ -240,7 +273,7 @@ function SettingsModal({ dashboard, settings, unreadCount, ui, onClose, onTestNo
     {tab === 'tracking' && <div className="settings-form"><NumberInput label={ui.labels.idle} min={1} max={30} value={draft.tracking.idle_threshold_minutes} onChange={(v) => setTracking('idle_threshold_minutes', v)} /><Checkbox label={ui.labels.activeWindow} checked={draft.tracking.track_active_window} onChange={(v) => setTracking('track_active_window', v)} /><Checkbox label={ui.labels.windowTitles} checked={draft.tracking.track_window_titles} onChange={(v) => setTracking('track_window_titles', v)} /><Checkbox label={ui.labels.keyboard} checked={draft.tracking.track_keyboard_activity} onChange={(v) => setTracking('track_keyboard_activity', v)} /><Checkbox label={ui.labels.mouse} checked={draft.tracking.track_mouse_activity} onChange={(v) => setTracking('track_mouse_activity', v)} /><div className="field full"><label>{ui.labels.excluded}</label><div className="excluded-list">{draft.tracking.excluded_applications.length === 0 && <span className="empty-chip">{ui.labels.noExcluded}</span>}{draft.tracking.excluded_applications.map((item) => <button type="button" key={item} onClick={() => setTracking('excluded_applications', draft.tracking.excluded_applications.filter((entry) => entry !== item))}>{item} x</button>)}</div><div className="inline-input"><input value={excludedInput} onChange={(e) => setExcludedInput(e.target.value)} placeholder="example.exe" /><button type="button" onClick={() => { const value = excludedInput.trim(); if (!value) return; setTracking('excluded_applications', [...draft.tracking.excluded_applications, value]); setExcludedInput('') }}>{ui.actions.add}</button></div></div></div>}
     {tab === 'notifications' && <div className="settings-form"><Checkbox label={ui.labels.breakRecommendations} checked={draft.notifications.break_recommendations} onChange={(v) => setNotifications('break_recommendations', v)} /><Checkbox label={ui.labels.performanceWarnings} checked={draft.notifications.performance_warnings} onChange={(v) => setNotifications('performance_warnings', v)} /><Select label={ui.labels.minInterval} value={String(draft.notifications.minimum_interval_minutes)} options={['15', '30', '45', '60']} onChange={(v) => setNotifications('minimum_interval_minutes', Number(v))} /><NumberInput label={ui.labels.liveInterval} min={60} max={300} value={draft.notifications.live_check_interval_seconds} onChange={(v) => setNotifications('live_check_interval_seconds', v)} /><TextInput label={ui.labels.dndStart} value={draft.notifications.do_not_disturb_start} onChange={(v) => setNotifications('do_not_disturb_start', v)} /><TextInput label={ui.labels.dndEnd} value={draft.notifications.do_not_disturb_end} onChange={(v) => setNotifications('do_not_disturb_end', v)} /><SettingRow label={ui.labels.unread} value={String(unreadCount)} /><button type="button" className="button primary" onClick={onTestNotification}>{ui.actions.testNotification}</button></div>}
     {tab === 'privacy' && <div className="settings-form"><SettingRow label={ui.labels.database} value={dashboard?.db_path ?? '-'} /><SettingRow label={ui.labels.storage} value={ui.values.localSqlite} /><SettingRow label={ui.labels.typedText} value={ui.values.never} /><SettingRow label={ui.labels.screenshots} value={ui.values.never} /><SettingRow label={ui.labels.eventsLoaded} value={String(dashboard?.event_count ?? 0)} /><div className="danger-grid"><ActionButton label={ui.actions.exportData} command="export_data" onDone={(m) => setStatus(`${ui.exported}: ${m}`)} /><ActionButton label={ui.actions.deleteTelemetry} command="delete_telemetry" danger onDone={() => setStatus(`${ui.deleted}: ${ui.actions.deleteTelemetry}`)} /><ActionButton label={ui.actions.deleteReports} command="delete_self_reports" danger onDone={() => setStatus(`${ui.deleted}: ${ui.actions.deleteReports}`)} /><ActionButton label={ui.actions.deleteInterventions} command="delete_interventions" danger onDone={() => setStatus(`${ui.deleted}: ${ui.actions.deleteInterventions}`)} /><ActionButton label={ui.actions.deleteModel} command="delete_model" danger onDone={() => setStatus(`${ui.deleted}: ${ui.actions.deleteModel}`)} /><ActionButton label={ui.actions.deleteAll} command="delete_all_data" danger onDone={() => setStatus(`${ui.deleted}: ${ui.actions.deleteAll}`)} /></div>{status && <p className="settings-status">{status}</p>}</div>}
-    {tab === 'model' && <div className="settings-form"><NumberInput label={ui.labels.modelSamples} min={5} max={500} value={draft.model.min_training_samples} onChange={(v) => update({ ...draft, model: { min_training_samples: v } })} /><SettingRow label={ui.labels.personalModel} value={ui.values.collecting} /><SettingRow label={ui.labels.trainingUi} value={ui.values.trainingLater} /></div>}
+    {tab === 'model' && <div className="settings-form"><SettingRow label={ui.demoModel} value={`${demoPrediction?.model_version ?? 'demo-v1'} / Synthetic demo`} /><SettingRow label={ui.demo} value={ui.demoDisclaimer} /><SettingRow label={ui.labels.eventsLoaded} value={String(demoPrediction?.metadata?.samples ?? 0)} /><SettingRow label="MAE" value={String(demoPrediction?.metadata?.metrics?.temporal?.effectiveness_mae?.toFixed(3) ?? '-')} /><SettingRow label="Decline ROC-AUC" value={String(demoPrediction?.metadata?.metrics?.temporal?.decline_roc_auc?.toFixed(3) ?? '-')} /><SettingRow label="Inference latency" value={`${demoPrediction?.latency_ms ?? '-'} ms`} /><NumberInput label={ui.labels.modelSamples} min={5} max={500} value={draft.model.min_training_samples} onChange={(v) => update({ ...draft, model: { min_training_samples: v } })} /><SettingRow label={ui.labels.personalModel} value={ui.values.collecting} /><SettingRow label={ui.labels.trainingUi} value={ui.values.trainingLater} /></div>}
   </div><div className="settings-actions"><button type="button" className="button" onClick={onClose}>{ui.close}</button><button type="button" className="button primary" onClick={() => onSave(draft)}>{ui.save}</button></div></section></aside>
 }
 
@@ -266,7 +299,6 @@ function Rating({ label, value, onChange }: { label: string; value: number; onCh
 }
 function translateMetric(value: string, language: 'en' | 'ru') { if (language !== 'ru') return value; return ({ 'Focused time': '\u0412\u0440\u0435\u043c\u044f \u0444\u043e\u043a\u0443\u0441\u0430', 'Active time': '\u0410\u043a\u0442\u0438\u0432\u043d\u043e\u0435 \u0432\u0440\u0435\u043c\u044f', 'Context switches': '\u041f\u0435\u0440\u0435\u043a\u043b\u044e\u0447\u0435\u043d\u0438\u044f', 'Input events': '\u0421\u043e\u0431\u044b\u0442\u0438\u044f \u0432\u0432\u043e\u0434\u0430', 'Current state': '\u0422\u0435\u043a\u0443\u0449\u0435\u0435 \u0441\u043e\u0441\u0442\u043e\u044f\u043d\u0438\u0435' } as Record<string, string>)[value] ?? value }
 function translateMetricDetail(value: string, language: 'en' | 'ru') { if (language !== 'ru') return value; return ({ 'Non-idle work outside common distractions': '\u0410\u043a\u0442\u0438\u0432\u043d\u0430\u044f \u0440\u0430\u0431\u043e\u0442\u0430 \u0432\u043d\u0435 \u043e\u0442\u0432\u043b\u0435\u0447\u0435\u043d\u0438\u0439', 'Keyboard, mouse, and foreground activity': '\u041a\u043b\u0430\u0432\u0438\u0430\u0442\u0443\u0440\u0430, \u043c\u044b\u0448\u044c \u0438 \u0430\u043a\u0442\u0438\u0432\u043d\u043e\u0435 \u043e\u043a\u043d\u043e', 'Foreground app changes': '\u0421\u043c\u0435\u043d\u044b \u0430\u043a\u0442\u0438\u0432\u043d\u043e\u0433\u043e \u043e\u043a\u043d\u0430', 'Aggregate counts, no typed text': '\u0422\u043e\u043b\u044c\u043a\u043e \u0441\u0447\u0451\u0442\u0447\u0438\u043a\u0438, \u0431\u0435\u0437 \u0442\u0435\u043a\u0441\u0442\u0430', 'Derived from local telemetry only': '\u0420\u0430\u0441\u0441\u0447\u0438\u0442\u0430\u043d\u043e \u0438\u0437 \u043b\u043e\u043a\u0430\u043b\u044c\u043d\u043e\u0439 \u0442\u0435\u043b\u0435\u043c\u0435\u0442\u0440\u0438\u0438' } as Record<string, string>)[value] ?? value }
-function translateState(value: string, language: 'en' | 'ru') { if (language !== 'ru') return value; return ({ 'No data yet': '\u0414\u0430\u043d\u043d\u044b\u0445 \u043f\u043e\u043a\u0430 \u043d\u0435\u0442', 'Deep work': '\u0413\u043b\u0443\u0431\u043e\u043a\u0430\u044f \u0440\u0430\u0431\u043e\u0442\u0430', Working: '\u0420\u0430\u0431\u043e\u0442\u0430', 'Warming up': '\u0420\u0430\u0437\u0433\u043e\u043d' } as Record<string, string>)[value] ?? value }
 function localizeNotificationTitle(value: string, language: 'en' | 'ru') { if (language !== 'ru') return value; return ({ 'Time for a break': '\u041f\u043e\u0440\u0430 \u043d\u0430 \u043f\u0435\u0440\u0435\u0440\u044b\u0432', 'AttentionOS test': '\u0422\u0435\u0441\u0442 AttentionOS' } as Record<string, string>)[value] ?? value }
 function localizeNotificationBody(value: string, language: 'en' | 'ru') {
   if (language !== 'ru') return value
@@ -280,6 +312,38 @@ function localizeNotificationMeta(kind: string, state: string, language: 'en' | 
   const states: Record<string, string> = { unread: '\u043d\u043e\u0432\u043e\u0435', read: '\u043f\u0440\u043e\u0447\u0438\u0442\u0430\u043d\u043e', dismissed: '\u0441\u043a\u0440\u044b\u0442\u043e' }
   const kinds: Record<string, string> = { intervention: '\u0440\u0435\u043a\u043e\u043c\u0435\u043d\u0434\u0430\u0446\u0438\u044f', system: '\u0441\u0438\u0441\u0442\u0435\u043c\u0430' }
   return `${kinds[kind] ?? kind} - ${states[state] ?? state}`
+}
+function applyDemoMetric(dashboard: DashboardPayload, demo: DemoPrediction): DashboardPayload {
+  const metrics = dashboard.metrics.filter((item) => item.label !== 'Input events')
+  const risk = demo.status === 'ready' ? Math.round((demo.decline_probability ?? 0) * 100) : null
+  metrics.push({
+    label: 'Decline risk',
+    value: risk === null ? '-' : `${risk}%`,
+    detail: demo.status === 'ready' ? 'Demo model trained on synthetic data' : 'Collecting at least 30 minutes of telemetry',
+  })
+  return { ...dashboard, metrics }
+}
+function demoStateTitle(demo: DemoPrediction | null, language: 'en' | 'ru', fallback?: string) {
+  if (!demo || demo.status !== 'ready') return language === 'ru' ? '\u0421\u0431\u043e\u0440 \u0434\u0430\u043d\u043d\u044b\u0445' : (fallback ?? 'Collecting data')
+  const risk = demo.decline_probability ?? 0
+  const eff = demo.current_effectiveness ?? 3
+  if (risk >= 0.68) return language === 'ru' ? '\u0412\u0435\u0440\u043e\u044f\u0442\u043d\u043e\u0435 \u0441\u043d\u0438\u0436\u0435\u043d\u0438\u0435' : 'Possible decline'
+  if (eff >= 3.7) return language === 'ru' ? '\u0412\u044b\u0441\u043e\u043a\u0430\u044f \u044d\u0444\u0444\u0435\u043a\u0442\u0438\u0432\u043d\u043e\u0441\u0442\u044c' : 'High effectiveness'
+  return language === 'ru' ? '\u0421\u0442\u0430\u0431\u0438\u043b\u044c\u043d\u043e' : 'Stable'
+}
+function localizeDemoAction(action: string, language: 'en' | 'ru') {
+  if (language !== 'ru') return action.replace('_', ' ')
+  return ({ CONTINUE: '\u041f\u0440\u043e\u0434\u043e\u043b\u0436\u0430\u0442\u044c', BREAK_10: '\u041f\u0435\u0440\u0435\u0440\u044b\u0432 10 \u043c\u0438\u043d', BREAK_20: '\u041f\u0435\u0440\u0435\u0440\u044b\u0432 20 \u043c\u0438\u043d', SWITCH_TASK: '\u0421\u043c\u0435\u043d\u0438\u0442\u044c \u0437\u0430\u0434\u0430\u0447\u0443' } as Record<string, string>)[action] ?? action
+}
+function localizeSignal(name: string, language: 'en' | 'ru') {
+  if (language !== 'ru') return name.replaceAll('_', ' ')
+  return ({
+    session_duration_vs_baseline: '\u0421\u0435\u0441\u0441\u0438\u044f \u043a baseline',
+    switch_rate_delta_5_30: '\u0420\u043e\u0441\u0442 \u043f\u0435\u0440\u0435\u043a\u043b\u044e\u0447\u0435\u043d\u0438\u0439',
+    input_rate_slope_30m: '\u0422\u0440\u0435\u043d\u0434 \u0432\u0432\u043e\u0434\u0430',
+    active_ratio_vs_baseline: '\u0410\u043a\u0442\u0438\u0432\u043d\u043e\u0441\u0442\u044c \u043a baseline',
+    workload_last_4h: '\u041d\u0430\u0433\u0440\u0443\u0437\u043a\u0430 4\u0447',
+  } as Record<string, string>)[name] ?? name
 }
 
 export default App

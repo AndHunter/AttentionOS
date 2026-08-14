@@ -1,0 +1,14 @@
+{
+  "dataset_version": "synthetic-demo-v1",
+  "seed": 42,
+  "users": 20,
+  "days": 8,
+  "resolution_seconds": 180,
+  "step_minutes": 15,
+  "telemetry_rows": 22345,
+  "reports": 538,
+  "interventions": 1846,
+  "training_samples": 4214,
+  "created_at": "2026-08-14T23:34:07.740088",
+  "note": "Demo model trained on synthetic data. Synthetic metrics are not real-world validation."
+}
