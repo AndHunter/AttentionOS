@@ -488,6 +488,63 @@
   box-shadow: 0 24px 70px rgb(22 24 29 / 0.24);
 }
 
+.report-modal {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  display: grid;
+  grid-template-rows: auto 1fr auto;
+  width: min(520px, calc(100vw - 48px));
+  max-height: min(620px, calc(100vh - 48px));
+  transform: translate(-50%, -50%);
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: var(--surface);
+  box-shadow: 0 24px 70px rgb(22 24 29 / 0.24);
+}
+
+.report-body {
+  display: grid;
+  gap: 18px;
+  padding: 12px 24px 22px;
+}
+
+.rating-row {
+  display: grid;
+  gap: 8px;
+}
+
+.rating-row > span {
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.rating-row > div {
+  display: grid;
+  grid-template-columns: repeat(5, 1fr);
+  gap: 8px;
+}
+
+.rating-row button {
+  min-height: 42px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface-secondary);
+  color: var(--text);
+  cursor: pointer;
+  font: inherit;
+  font-weight: 700;
+}
+
+.rating-row button.active,
+.rating-row button:hover {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
 .settings-titlebar {
   display: flex;
   justify-content: space-between;
@@ -582,7 +639,8 @@
 
 .field input,
 .field select,
-.inline-input input {
+.inline-input input,
+.field textarea {
   width: 100%;
   min-height: 38px;
   border: 1px solid var(--border);
@@ -590,6 +648,13 @@
   background: var(--surface-secondary);
   color: var(--text);
   padding: 8px 10px;
+}
+
+.field textarea {
+  box-sizing: border-box;
+  min-height: 96px;
+  resize: vertical;
+  font: inherit;
 }
 
 .check-row {

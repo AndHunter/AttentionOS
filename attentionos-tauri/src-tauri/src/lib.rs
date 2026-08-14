@@ -83,6 +83,15 @@ struct NotificationPayload {
     kind: String,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+struct SelfReportPayload {
+    effectiveness: i64,
+    fatigue: i64,
+    difficulty: i64,
+    note: String,
+    task: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct UserPreferences {
     language: String,
@@ -248,6 +257,45 @@ fn mark_notification_read(id: i64) -> Result<(), String> {
     )
     .map_err(|err| err.to_string())?;
     Ok(())
+}
+
+#[tauri::command]
+fn save_self_report(report: SelfReportPayload) -> Result<(), String> {
+    let db_path = attentionos_db_path()?;
+    let conn = Connection::open(db_path).map_err(|err| err.to_string())?;
+    let now_utc = chrono::Utc::now().naive_utc();
+    let window_start = now_utc - chrono::Duration::minutes(30);
+    let note = report.note.trim();
+    conn.execute(
+        "INSERT INTO self_reports (
+            timestamp,
+            task_name,
+            telemetry_window_start,
+            telemetry_window_end,
+            perceived_effectiveness,
+            perceived_fatigue,
+            task_difficulty,
+            note
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        params![
+            now_utc.to_string(),
+            report.task,
+            window_start.to_string(),
+            now_utc.to_string(),
+            report.effectiveness.clamp(1, 5),
+            report.fatigue.clamp(1, 5),
+            report.difficulty.clamp(1, 5),
+            if note.is_empty() { None } else { Some(note.to_string()) },
+        ],
+    )
+    .map_err(|err| err.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+fn evaluate_recommendations() -> Result<Vec<NotificationPayload>, String> {
+    run_recommendation_service()?;
+    get_notifications(Some(8))
 }
 
 #[tauri::command]
@@ -466,6 +514,58 @@ fn python_collector_command() -> Result<Command, String> {
     }
 
     Err("Could not find Python. Install Python 3.12+ and make sure python or py is available in PATH.".to_string())
+}
+
+fn run_recommendation_service() -> Result<(), String> {
+    let stdout = open_collector_log("recommendations_stdout.log")?;
+    let stderr = open_collector_log("recommendations_stderr.log")?;
+    let mut command = python_collector_command()?;
+    command
+        .args([
+            "-c",
+            "from attentionos.config import get_config; from attentionos.settings import SettingsStore; from attentionos.application.recommendations import RecommendationService; c=get_config(); s=SettingsStore(c.data_dir / 'settings.json').load(); RecommendationService(c, s).evaluate_now()",
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(stdout))
+        .stderr(Stdio::from(stderr))
+        .env("PYTHONUTF8", "1");
+    #[cfg(windows)]
+    command.creation_flags(CREATE_NO_WINDOW);
+    let status = command
+        .status()
+        .map_err(|err| format!("Could not evaluate recommendations via Python: {err}"))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!(
+            "Recommendation evaluation exited with status {status}. {}",
+            recommendation_stderr_tail()
+        ))
+    }
+}
+
+fn recommendation_stderr_tail() -> String {
+    let Ok(path) = attentionos_data_dir().map(|dir| dir.join("recommendations_stderr.log")) else {
+        return String::new();
+    };
+    let Ok(mut file) = File::open(path) else {
+        return String::new();
+    };
+    let mut raw = String::new();
+    let _ = file.read_to_string(&mut raw);
+    let tail = raw
+        .chars()
+        .rev()
+        .take(1200)
+        .collect::<String>()
+        .chars()
+        .rev()
+        .collect::<String>();
+    if tail.trim().is_empty() {
+        String::new()
+    } else {
+        format!("stderr: {tail}")
+    }
 }
 
 fn load_runtime_settings() -> RuntimeSettingsPayload {
@@ -847,6 +947,7 @@ pub fn run() {
         .manage(CollectorProcess {
             child: Mutex::new(None),
         })
+        .plugin(tauri_plugin_notification::init())
         .setup(|app| {
             if cfg!(debug_assertions) {
                 app.handle().plugin(
@@ -910,6 +1011,8 @@ pub fn run() {
             get_dashboard,
             get_notifications,
             mark_notification_read,
+            save_self_report,
+            evaluate_recommendations,
             get_settings,
             save_settings,
             start_tracking,
