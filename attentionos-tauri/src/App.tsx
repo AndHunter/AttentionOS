@@ -72,7 +72,13 @@ const en = {
 
 function lang(settings: RuntimeSettings | null): 'en' | 'ru' { return settings?.preferences.language === 'ru' ? 'ru' : 'en' }
 function tx(settings: RuntimeSettings | null) { return lang(settings) === 'ru' ? ru : en }
-function todayIso() { return new Date().toISOString().slice(0, 10) }
+function todayIso() {
+  const date = new Date()
+  const year = date.getFullYear()
+  const month = String(date.getMonth() + 1).padStart(2, '0')
+  const day = String(date.getDate()).padStart(2, '0')
+  return `${year}-${month}-${day}`
+}
 function shiftDate(value: string, days: number) { const date = new Date(`${value}T12:00:00`); date.setDate(date.getDate() + days); return date.toISOString().slice(0, 10) }
 function formatDate(value: string) { return new Intl.DateTimeFormat('en', { weekday: 'short', month: 'short', day: 'numeric' }).format(new Date(`${value}T12:00:00`)) }
 function formatMinutes(minutes: number) { const h = Math.floor(minutes / 60); const m = minutes % 60; return h > 0 ? `${h}h ${String(m).padStart(2, '0')}m` : `${m}m` }
@@ -107,6 +113,12 @@ function App() {
   }
 
   useEffect(() => { refresh(date) }, [date])
+  useEffect(() => {
+    const timer = window.setInterval(() => {
+      refresh(date)
+    }, tracking ? 10000 : 30000)
+    return () => window.clearInterval(timer)
+  }, [date, tracking])
   const unreadCount = notifications.filter((item) => item.state === 'unread').length
   const appColor = useMemo(() => { const map = new Map<string, string>(); dashboard?.timeline.forEach((s) => { if (!map.has(s.app)) map.set(s.app, palette[map.size % palette.length]) }); return map }, [dashboard?.timeline])
   const taskOptions = useMemo(() => Array.from(new Set(['None', ...defaultTasks, ...(settings?.preferences.current_task_label && settings.preferences.current_task_label !== 'None' ? [settings.preferences.current_task_label] : [])])), [settings?.preferences.current_task_label])

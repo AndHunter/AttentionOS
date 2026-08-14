@@ -3,9 +3,13 @@ use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::env;
+use std::fs::{File, OpenOptions};
+use std::io::Read;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::sync::Mutex;
+use std::thread;
+use std::time::Duration;
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{AppHandle, Manager};
@@ -276,17 +280,27 @@ fn start_tracking(state: tauri::State<'_, CollectorProcess>) -> Result<(), Strin
             return Ok(());
         }
     }
-    let mut command = Command::new("python");
+    let stdout = open_collector_log("collector_stdout.log")?;
+    let stderr = open_collector_log("collector_stderr.log")?;
+    let mut command = python_collector_command()?;
     command
         .args(["-m", "attentionos.collector.engine"])
         .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
+        .stdout(Stdio::from(stdout))
+        .stderr(Stdio::from(stderr))
+        .env("PYTHONUTF8", "1");
     #[cfg(windows)]
     command.creation_flags(CREATE_NO_WINDOW);
-    let child = command
+    let mut child = command
         .spawn()
         .map_err(|err| format!("Could not start collector via Python: {err}"))?;
+    thread::sleep(Duration::from_millis(900));
+    if let Some(status) = child.try_wait().map_err(|err| err.to_string())? {
+        return Err(format!(
+            "Collector exited immediately with status {status}. {}",
+            collector_stderr_tail()
+        ));
+    }
     *guard = Some(child);
     Ok(())
 }
@@ -386,6 +400,72 @@ fn attentionos_data_dir() -> Result<PathBuf, String> {
 
 fn attentionos_settings_path() -> Result<PathBuf, String> {
     Ok(attentionos_data_dir()?.join("settings.json"))
+}
+
+fn open_collector_log(file_name: &str) -> Result<File, String> {
+    let path = attentionos_data_dir()?.join(file_name);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|err| err.to_string())?;
+    }
+    OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .map_err(|err| err.to_string())
+}
+
+fn collector_stderr_tail() -> String {
+    let Ok(path) = attentionos_data_dir().map(|dir| dir.join("collector_stderr.log")) else {
+        return String::new();
+    };
+    let Ok(mut file) = File::open(path) else {
+        return String::new();
+    };
+    let mut raw = String::new();
+    let _ = file.read_to_string(&mut raw);
+    let tail = raw
+        .chars()
+        .rev()
+        .take(1200)
+        .collect::<String>()
+        .chars()
+        .rev()
+        .collect::<String>();
+    if tail.trim().is_empty() {
+        String::new()
+    } else {
+        format!("stderr: {tail}")
+    }
+}
+
+fn python_collector_command() -> Result<Command, String> {
+    let candidates: Vec<(&str, Vec<&str>)> = if cfg!(windows) {
+        vec![
+            ("python", vec!["--version"]),
+            ("py", vec!["-3", "--version"]),
+        ]
+    } else {
+        vec![
+            ("python3", vec!["--version"]),
+            ("python", vec!["--version"]),
+        ]
+    };
+
+    for (program, args) in candidates {
+        let mut probe = Command::new(program);
+        probe.args(args);
+        #[cfg(windows)]
+        probe.creation_flags(CREATE_NO_WINDOW);
+        if probe.output().map(|output| output.status.success()).unwrap_or(false) {
+            let mut command = Command::new(program);
+            if program == "py" {
+                command.arg("-3");
+            }
+            return Ok(command);
+        }
+    }
+
+    Err("Could not find Python. Install Python 3.12+ and make sure python or py is available in PATH.".to_string())
 }
 
 fn load_runtime_settings() -> RuntimeSettingsPayload {
@@ -500,7 +580,7 @@ fn load_events_for_day(conn: &Connection, date: &str) -> Result<Vec<EventRow>, S
         .prepare(
             "SELECT ts_start, ts_end, process_name, idle_seconds, keyboard_events, mouse_events, task_label
              FROM activity_events
-             WHERE substr(ts_start, 1, 10) = ?1
+             WHERE substr(datetime(ts_start, 'localtime'), 1, 10) = ?1
              ORDER BY ts_start ASC",
         )
         .map_err(|err| err.to_string())?;
@@ -638,6 +718,11 @@ fn parse_sqlite_time(value: &str) -> chrono::NaiveDateTime {
     let normalized = value.replace('T', " ");
     let trimmed = normalized.split('.').next().unwrap_or(&normalized);
     chrono::NaiveDateTime::parse_from_str(trimmed, "%Y-%m-%d %H:%M:%S")
+        .map(|utc| {
+            chrono::DateTime::<chrono::Utc>::from_naive_utc_and_offset(utc, chrono::Utc)
+                .with_timezone(&Local)
+                .naive_local()
+        })
         .unwrap_or_else(|_| Local::now().naive_local())
 }
 
