@@ -1,4 +1,4 @@
-"""Real-time demo inference over current local SQLite telemetry."""
+﻿"""Real-time demo inference over current local SQLite telemetry."""
 
 from __future__ import annotations
 
@@ -84,7 +84,9 @@ def run_demo_inference(
             idle_ratio_delta_5_30=float(row["idle_ratio_delta_5_30"]),
             session_duration_vs_baseline=float(row["session_duration_vs_baseline"]),
         )
-        break_lock = _active_break_lock(db, now_local)
+        tracking_started_at = _tracking_started_at(db)
+        tracking_elapsed = _tracking_elapsed_minutes(tracking_started_at, now_local)
+        break_lock = _active_break_lock(db, now_local, tracking_started_at)
         if break_lock is not None:
             recommendation = replace(
                 recommendation,
@@ -96,6 +98,18 @@ def run_demo_inference(
                 recommended_break_minutes=break_lock["minutes"],
                 break_benefit=max(recommendation.break_benefit, float(break_lock["benefit"])),
                 next_break_eta_minutes=0,
+                policy_source="FALLBACK",
+            )
+        elif tracking_elapsed is not None and tracking_elapsed < 30:
+            recommendation = replace(
+                recommendation,
+                action="CONTINUE",
+                state="WORK",
+                title="Work",
+                reason=f"fresh_tracking_start: only {tracking_elapsed:.0f} minutes since Start Tracking.",
+                confidence=max(recommendation.confidence, 0.82),
+                recommended_break_minutes=None,
+                next_break_eta_minutes=5,
                 policy_source="FALLBACK",
             )
         result = {
@@ -193,7 +207,13 @@ def _persist_prediction(db_path: Path, result: dict[str, object], now_local: dat
         now_utc = now_local.astimezone(timezone.utc).replace(tzinfo=None).isoformat(sep=" ")
         rec = result["recommendation"]
         assert isinstance(rec, dict)
-        should_notify_break = result.get("state") == "BREAK_RECOMMENDED" and _should_notify_break(conn)
+        previous_action = _previous_prediction_action(conn)
+        should_notify_break = result.get("state") == "BREAK_RECOMMENDED" and not previous_action.startswith("BREAK")
+        should_notify_work = (
+            result.get("state") == "WORK"
+            and previous_action.startswith("BREAK")
+            and result.get("recommended_action") == "CONTINUE"
+        )
         conn.execute(
             "INSERT INTO ml_predictions ("
             "timestamp, model_version, effectiveness, decline_15m, decline_30m, decline_60m, "
@@ -232,10 +252,17 @@ def _persist_prediction(db_path: Path, result: dict[str, object], now_local: dat
                 (now_utc, body, json.dumps({"source": "demo_ml", "prediction": result.get("recommended_action")})),
             )
             _show_windows_notification("AttentionOS", body)
+        elif should_notify_work:
+            body = "Можно возвращаться к работе. Перерыв завершён, состояние переоценено."
+            conn.execute(
+                "INSERT INTO notifications (created_at, title, body, state, intervention_id, kind, action_payload) "
+                "VALUES (?1, 'AttentionOS', ?2, 'unread', NULL, 'ml_ready_to_work', ?3)",
+                (now_utc, body, json.dumps({"source": "demo_ml", "prediction": result.get("recommended_action")})),
+            )
+            _show_windows_notification("AttentionOS", body)
         conn.commit()
     finally:
         conn.close()
-
 
 def _ensure_ml_tables(conn: sqlite3.Connection) -> None:
     conn.execute(
@@ -257,26 +284,36 @@ def _ensure_ml_tables(conn: sqlite3.Connection) -> None:
     )
 
 
-def _should_notify_break(conn: sqlite3.Connection) -> bool:
+def _previous_prediction_action(conn: sqlite3.Connection) -> str:
     row = conn.execute(
         "SELECT recommended_action FROM ml_predictions ORDER BY id DESC LIMIT 1"
     ).fetchone()
     if row is None:
-        return True
-    previous = str(row[0] or "")
-    return not previous.startswith("BREAK")
+        return ""
+    return str(row[0] or "")
 
 
-def _active_break_lock(db_path: Path, now_local: datetime) -> dict[str, object] | None:
+def _active_break_lock(
+    db_path: Path,
+    now_local: datetime,
+    tracking_started_at: datetime | None = None,
+) -> dict[str, object] | None:
     if not db_path.exists():
         return None
     conn = sqlite3.connect(db_path)
     try:
         _ensure_ml_tables(conn)
-        row = conn.execute(
-            "SELECT timestamp, recommended_action, recommended_duration FROM recommendations "
-            "WHERE recommended_action LIKE 'BREAK_%' ORDER BY id DESC LIMIT 1"
-        ).fetchone()
+        if tracking_started_at is None:
+            row = conn.execute(
+                "SELECT timestamp, recommended_action, recommended_duration FROM recommendations "
+                "WHERE recommended_action LIKE 'BREAK_%' ORDER BY id DESC LIMIT 1"
+            ).fetchone()
+        else:
+            row = conn.execute(
+                "SELECT timestamp, recommended_action, recommended_duration FROM recommendations "
+                "WHERE recommended_action LIKE 'BREAK_%' AND timestamp >= ?1 ORDER BY id DESC LIMIT 1",
+                (tracking_started_at.replace(tzinfo=None).isoformat(sep=" "),),
+            ).fetchone()
     finally:
         conn.close()
     if row is None:
@@ -297,6 +334,31 @@ def _active_break_lock(db_path: Path, now_local: datetime) -> dict[str, object] 
         "until_local": until_utc.astimezone(now_local.tzinfo).strftime("%H:%M"),
     }
 
+
+def _tracking_started_at(db_path: Path) -> datetime | None:
+    if not db_path.exists():
+        return None
+    conn = sqlite3.connect(db_path)
+    try:
+        row = conn.execute(
+            "SELECT value FROM app_runtime_state WHERE key = 'tracking_started_at'"
+        ).fetchone()
+    except sqlite3.Error:
+        return None
+    finally:
+        conn.close()
+    if row is None:
+        return None
+    try:
+        return datetime.fromisoformat(str(row[0])).replace(tzinfo=timezone.utc)
+    except ValueError:
+        return None
+
+
+def _tracking_elapsed_minutes(started_at: datetime | None, now_local: datetime) -> float | None:
+    if started_at is None:
+        return None
+    return max((now_local.astimezone(timezone.utc) - started_at).total_seconds() / 60, 0.0)
 
 def _show_windows_notification(title: str, body: str) -> None:
     try:
@@ -401,3 +463,5 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
+

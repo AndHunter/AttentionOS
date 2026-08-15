@@ -7,6 +7,7 @@ import signal
 import sys
 import time
 from datetime import UTC, datetime
+from pathlib import Path
 
 from attentionos.collector.foreground import ForegroundTracker
 from attentionos.collector.idle import IdleTracker
@@ -50,6 +51,9 @@ class CollectorEngine:
             for item in self._runtime_settings.tracking.excluded_applications
             if item.strip()
         }
+        self._settings_path = self._config.data_dir / "settings.json"
+        self._settings_mtime: float | None = self._settings_modified_at(self._settings_path)
+        self._last_settings_check: float = 0.0
 
         # Statistics
         self._total_events: int = 0
@@ -69,12 +73,32 @@ class CollectorEngine:
         """Apply runtime settings without restarting the collector thread."""
         self._runtime_settings = settings
         self._idle.set_threshold(settings.tracking.idle_threshold_minutes * 60)
+        task_label = settings.preferences.current_task_label
+        self.set_task_label(None if task_label == "None" else task_label)
         self._excluded_apps = {
             item.strip().lower()
             for item in settings.tracking.excluded_applications
             if item.strip()
         }
         logger.info("Collector runtime settings updated.")
+
+    def _reload_settings_if_changed(self) -> None:
+        now = time.monotonic()
+        if now - self._last_settings_check < 3.0:
+            return
+        self._last_settings_check = now
+        mtime = self._settings_modified_at(self._settings_path)
+        if mtime is None or mtime == self._settings_mtime:
+            return
+        self._settings_mtime = mtime
+        self.update_runtime_settings(SettingsStore(self._settings_path).load())
+
+    @staticmethod
+    def _settings_modified_at(path: Path) -> float | None:
+        try:
+            return path.stat().st_mtime
+        except OSError:
+            return None
 
     # -----------------------------------------------------------------------
     # Core loop
@@ -208,6 +232,7 @@ class CollectorEngine:
         try:
             while self._running:
                 loop_start = time.monotonic()
+                self._reload_settings_if_changed()
 
                 # Detect sleep/wake
                 if self._detect_sleep_wake(last_tick):

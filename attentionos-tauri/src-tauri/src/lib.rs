@@ -399,6 +399,7 @@ fn start_tracking(state: tauri::State<'_, CollectorProcess>) -> Result<(), Strin
             return Ok(());
         }
     }
+    record_tracking_started()?;
     let stdout = open_collector_log("collector_stdout.log")?;
     let stderr = open_collector_log("collector_stderr.log")?;
     let mut command = python_collector_command()?;
@@ -421,6 +422,23 @@ fn start_tracking(state: tauri::State<'_, CollectorProcess>) -> Result<(), Strin
         ));
     }
     *guard = Some(child);
+    Ok(())
+}
+
+fn record_tracking_started() -> Result<(), String> {
+    let db_path = attentionos_db_path()?;
+    let conn = Connection::open(db_path).map_err(|err| err.to_string())?;
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS app_runtime_state (key TEXT PRIMARY KEY, value TEXT NOT NULL)",
+        [],
+    )
+    .map_err(|err| err.to_string())?;
+    conn.execute(
+        "INSERT INTO app_runtime_state (key, value) VALUES ('tracking_started_at', ?1) \
+         ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+        params![chrono::Utc::now().naive_utc().to_string()],
+    )
+    .map_err(|err| err.to_string())?;
     Ok(())
 }
 

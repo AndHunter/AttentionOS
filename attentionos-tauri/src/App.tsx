@@ -211,7 +211,7 @@ function App() {
         const notes = await invoke<NotificationPayload[]>('get_notifications', { limit: 8 })
         setNotifications(notes)
         const newest = notes.find((item) => item.state === 'unread')
-        if (newest && newest.id > lastToastId) {
+        if (newest && newest.id > lastToastId && !newest.kind.startsWith('ml_')) {
           const granted = await ensureNotificationPermission()
           if (granted) sendNotification({ title: localizeNotificationTitle(newest.title, lang(settings)), body: localizeNotificationBody(newest.body, lang(settings)) })
           setLastToastId(newest.id)
