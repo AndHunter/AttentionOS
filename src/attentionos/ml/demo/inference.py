@@ -4,76 +4,142 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import sys
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 
 from attentionos.config import get_config
-from attentionos.ml.demo.features import feature_schema, real_events_to_frame, build_features_at
+from attentionos.ml.demo.features import build_features_at, feature_schema, real_events_to_frame
 from attentionos.ml.demo.recommendation_engine import recommend_action
+
+
+INFERENCE_INTERVAL_SECONDS = 60
 
 
 def run_demo_inference(
     db_path: Path | None = None,
-    model_dir: Path = Path("models/demo"),
+    model_dir: Path | None = None,
     min_minutes: int = 30,
+    persist: bool = True,
 ) -> dict[str, object]:
     started = time.perf_counter()
+    now_local = datetime.now().astimezone()
     config = get_config()
     db = db_path or config.db_path
-    events = _load_recent_events(db)
-    if not events:
-        return _warmup("No telemetry yet", started)
-    frame = real_events_to_frame(events)
-    active_minutes = float(frame["active"].sum() * _resolution_minutes(frame))
-    if active_minutes < min_minutes:
-        return _warmup("Collecting data", started, active_minutes)
-    row = build_features_at(frame, frame["timestamp"].max())
-    models = _load_models(model_dir)
-    if models is None:
-        return _warmup("Demo model not trained", started, active_minutes)
+    diagnostics = _diagnostics(now_local, db)
+    try:
+        events = _load_recent_events(db, now_local)
+        diagnostics["feature_rows_available"] = len(events)
+        diagnostics["telemetry_available_minutes"] = round(_telemetry_span_minutes(events), 2)
+        if not events:
+            return _warmup("Нет telemetry за последние 24 часа.", started, diagnostics)
+        frame = real_events_to_frame(events)
+        active_minutes = float(frame["active"].sum() * _resolution_minutes(frame))
+        diagnostics["active_minutes"] = round(active_minutes, 2)
+        telemetry_minutes = max(active_minutes, float(diagnostics["telemetry_available_minutes"]))
+        if telemetry_minutes < min_minutes:
+            diagnostics["warmup_reason"] = f"Накоплено {telemetry_minutes:.0f} из {min_minutes} минут telemetry."
+            return _warmup(diagnostics["warmup_reason"], started, diagnostics, telemetry_minutes)
 
-    metadata, eff, decline, benefit = models
-    schema = feature_schema()
-    x = pd.DataFrame([{name: row.get(name, 0.0) for name in schema.all}])
-    current_effectiveness = float(np.clip(eff.predict(x)[0], 1, 5))
-    decline_probability = float(np.clip(decline.predict_proba(x)[0][1], 0, 1))
-    break_benefit = float(np.clip(benefit.predict(x)[0], 0, 1))
-    recommendation = recommend_action(
-        current_effectiveness=current_effectiveness,
-        decline_probability=decline_probability,
-        break_benefit=break_benefit,
-        continuous_work_minutes=float(row["continuous_work_minutes"]),
-        time_since_last_break=float(row["time_since_last_break"]),
-        workload_last_4h=float(row["workload_last_4h"]),
-    )
-    return {
-        "mode": "demo",
-        "status": "ready",
-        "disclaimer": "Demo model trained on synthetic data.",
-        "disclaimer_ru": "Демо-модель обучена на синтетических данных.",
-        "model_version": metadata.get("model_version", "demo-v1"),
-        "current_effectiveness": current_effectiveness,
-        "decline_probability": decline_probability,
-        "break_benefit": break_benefit,
-        "recommendation": recommendation.__dict__,
-        "signals": _signals(row),
-        "active_minutes": active_minutes,
-        "latency_ms": round((time.perf_counter() - started) * 1000, 2),
-        "metadata": {
-            "samples": metadata.get("samples", 0),
-            "metrics": metadata.get("metrics", {}),
-            "feature_importance": metadata.get("feature_importance", {}),
-        },
-    }
+        row = build_features_at(frame, frame["timestamp"].max())
+        diagnostics["feature_vector_valid"] = True
+        resolved_model_dir = _resolve_model_dir(model_dir)
+        diagnostics["model_path"] = str(resolved_model_dir) if resolved_model_dir else None
+        models = _load_models(resolved_model_dir) if resolved_model_dir else None
+        diagnostics["model_loaded"] = models is not None
+        if models is None:
+            diagnostics["warmup_reason"] = "DEMO model files are missing; train or package models/demo."
+            return _warmup("DEMO model files are missing.", started, diagnostics, telemetry_minutes)
+
+        metadata, eff, decline, benefit = models
+        diagnostics["model_version"] = metadata.get("model_version", "demo-v1")
+        model_features = list(metadata.get("features") or feature_schema().all)
+        x = pd.DataFrame([{name: row.get(name, 0.0) for name in model_features}])
+        current_effectiveness_raw = float(np.clip(eff.predict(x)[0], 1, 5))
+        effectiveness = _effectiveness_to_100(current_effectiveness_raw)
+        decline_base = float(np.clip(decline.predict_proba(x)[0][1], 0, 1))
+        trend_pressure = _trend_pressure(row)
+        decline_15m = float(np.clip(decline_base * 0.72 + trend_pressure * 0.10, 0, 1))
+        decline_30m = float(np.clip(decline_base + trend_pressure * 0.08, 0, 1))
+        decline_60m = float(
+            np.clip(decline_base * 1.18 + trend_pressure * 0.14 + float(row["continuous_work_minutes"]) / 600, 0, 1)
+        )
+        raw_break_benefit = float(np.clip(benefit.predict(x)[0], 0, 1))
+        recommendation = recommend_action(
+            current_effectiveness=current_effectiveness_raw,
+            decline_15m=decline_15m,
+            decline_30m=decline_30m,
+            decline_60m=decline_60m,
+            raw_break_benefit=raw_break_benefit,
+            continuous_work_minutes=float(row["continuous_work_minutes"]),
+            time_since_last_break=float(row["time_since_last_break"]),
+            workload_last_4h=float(row["workload_last_4h"]),
+            input_rate_delta_5_30=float(row["input_rate_delta_5_30"]),
+            switch_rate_delta_5_30=float(row["switch_rate_delta_5_30"]),
+            idle_ratio_delta_5_30=float(row["idle_ratio_delta_5_30"]),
+            session_duration_vs_baseline=float(row["session_duration_vs_baseline"]),
+        )
+        result = {
+            "mode": "demo",
+            "status": "ready",
+            "state": recommendation.state,
+            "disclaimer": "Demo model trained on synthetic data.",
+            "disclaimer_ru": "Демо-модель обучена на синтетических данных.",
+            "model_version": diagnostics["model_version"],
+            "current_effectiveness": round(effectiveness, 1),
+            "current_effectiveness_raw": round(current_effectiveness_raw, 3),
+            "decline_15m": round(decline_15m, 4),
+            "decline_30m": round(decline_30m, 4),
+            "decline_60m": round(decline_60m, 4),
+            "decline_probability": round(decline_30m, 4),
+            "break_benefit": recommendation.break_benefit,
+            "recommended_action": recommendation.action,
+            "recommended_break_minutes": recommendation.recommended_break_minutes,
+            "next_break_eta_minutes": recommendation.next_break_eta_minutes,
+            "policy_source": recommendation.policy_source,
+            "recommendation": recommendation.__dict__,
+            "signals": _signals(row),
+            "active_minutes": round(active_minutes, 2),
+            "telemetry_available_minutes": diagnostics["telemetry_available_minutes"],
+            "latency_ms": round((time.perf_counter() - started) * 1000, 2),
+            "diagnostics": diagnostics,
+            "metadata": {
+                "samples": metadata.get("samples", 0),
+                "metrics": metadata.get("metrics", {}),
+                "feature_importance": metadata.get("feature_importance", {}),
+            },
+        }
+        if persist:
+            _persist_prediction(db, result, now_local)
+        return result
+    except Exception as err:  # noqa: BLE001 - this path is surfaced in diagnostics, not swallowed.
+        diagnostics["last_inference_error"] = repr(err)
+        return _warmup("ML inference error; see diagnostics.", started, diagnostics)
 
 
-def _load_models(model_dir: Path):
+def _resolve_model_dir(model_dir: Path | None) -> Path | None:
+    candidates: list[Path] = []
+    if model_dir is not None:
+        candidates.append(model_dir)
+    candidates.append(Path("models/demo"))
+    here = Path(__file__).resolve()
+    candidates.extend(parent / "models" / "demo" for parent in here.parents)
+    for candidate in candidates:
+        if (candidate / "metadata.json").exists():
+            return candidate.resolve()
+    return None
+
+
+def _load_models(model_dir: Path | None):
+    if model_dir is None:
+        return None
     metadata_path = model_dir / "metadata.json"
-    if not metadata_path.exists():
+    model_paths = [metadata_path, model_dir / "effectiveness.cbm", model_dir / "decline.cbm", model_dir / "break_benefit.cbm"]
+    if not all(path.exists() for path in model_paths):
         return None
     from catboost import CatBoostClassifier, CatBoostRegressor
 
@@ -87,30 +153,156 @@ def _load_models(model_dir: Path):
     return metadata, eff, decline, benefit
 
 
-def _load_recent_events(db_path: Path) -> list[dict[str, object]]:
+def _load_recent_events(db_path: Path, now_local: datetime) -> list[dict[str, object]]:
     if not db_path.exists():
         return []
-    since = datetime.utcnow() - timedelta(hours=12)
+    since_local = now_local - timedelta(hours=24)
+    since_utc = since_local.astimezone(timezone.utc).replace(tzinfo=None)
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
     rows = conn.execute(
         "SELECT ts_start, ts_end, process_name, idle_seconds, keyboard_events, mouse_events, task_label "
         "FROM activity_events WHERE ts_start >= ? ORDER BY ts_start ASC",
-        (since.isoformat(sep=" "),),
+        (since_utc.isoformat(sep=" "),),
     ).fetchall()
+    conn.close()
     return [dict(row) for row in rows]
 
 
-def _warmup(reason: str, started: float, active_minutes: float = 0.0) -> dict[str, object]:
+def _persist_prediction(db_path: Path, result: dict[str, object], now_local: datetime) -> None:
+    if not db_path.exists():
+        return
+    conn = sqlite3.connect(db_path)
+    try:
+        _ensure_ml_tables(conn)
+        now_utc = now_local.astimezone(timezone.utc).replace(tzinfo=None).isoformat(sep=" ")
+        rec = result["recommendation"]
+        assert isinstance(rec, dict)
+        should_notify_break = result.get("state") == "BREAK_RECOMMENDED" and _should_notify_break(conn)
+        conn.execute(
+            "INSERT INTO ml_predictions ("
+            "timestamp, model_version, effectiveness, decline_15m, decline_30m, decline_60m, "
+            "continue_utility, best_break_utility, break_benefit, recommended_action, "
+            "recommended_break_minutes, next_break_eta, confidence, policy_source"
+            ") VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+            (
+                now_utc,
+                result.get("model_version"),
+                result.get("current_effectiveness"),
+                result.get("decline_15m"),
+                result.get("decline_30m"),
+                result.get("decline_60m"),
+                rec.get("continue_utility"),
+                rec.get("best_break_utility"),
+                result.get("break_benefit"),
+                result.get("recommended_action"),
+                result.get("recommended_break_minutes"),
+                result.get("next_break_eta_minutes"),
+                rec.get("confidence"),
+                result.get("policy_source"),
+            ),
+        )
+        if should_notify_break:
+            minutes = result.get("recommended_break_minutes") or 10
+            benefit = result.get("break_benefit") or 0
+            body = f"Пора сделать перерыв. Рекомендуемая длительность: {minutes} мин. Польза перерыва: {benefit}/10."
+            conn.execute(
+                "INSERT INTO recommendations (timestamp, recommended_action, recommended_duration, accepted) "
+                "VALUES (?1, ?2, ?3, 0)",
+                (now_utc, result.get("recommended_action"), minutes),
+            )
+            conn.execute(
+                "INSERT INTO notifications (created_at, title, body, state, intervention_id, kind, action_payload) "
+                "VALUES (?1, 'AttentionOS', ?2, 'unread', NULL, 'ml_break_recommendation', ?3)",
+                (now_utc, body, json.dumps({"source": "demo_ml", "prediction": result.get("recommended_action")})),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _ensure_ml_tables(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS ml_predictions ("
+        "id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp TEXT NOT NULL, model_version TEXT, effectiveness REAL, "
+        "decline_15m REAL, decline_30m REAL, decline_60m REAL, continue_utility REAL, best_break_utility REAL, "
+        "break_benefit REAL, recommended_action TEXT, recommended_break_minutes INTEGER, next_break_eta INTEGER, "
+        "confidence REAL, policy_source TEXT)"
+    )
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS recommendations ("
+        "id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp TEXT NOT NULL, recommended_action TEXT, "
+        "recommended_duration INTEGER, accepted INTEGER DEFAULT 0, started_at TEXT, completed_at TEXT, actual_duration REAL)"
+    )
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS notifications ("
+        "id INTEGER PRIMARY KEY AUTOINCREMENT, created_at TEXT NOT NULL, title TEXT NOT NULL, body TEXT NOT NULL, "
+        "state TEXT NOT NULL, intervention_id INTEGER, kind TEXT NOT NULL, action_payload TEXT)"
+    )
+
+
+def _should_notify_break(conn: sqlite3.Connection) -> bool:
+    row = conn.execute(
+        "SELECT recommended_action FROM ml_predictions ORDER BY id DESC LIMIT 1"
+    ).fetchone()
+    if row is None:
+        return True
+    previous = str(row[0] or "")
+    return not previous.startswith("BREAK")
+
+
+def _warmup(
+    reason: str,
+    started: float,
+    diagnostics: dict[str, object],
+    telemetry_minutes: float = 0.0,
+) -> dict[str, object]:
+    diagnostics["warmup_reason"] = diagnostics.get("warmup_reason") or reason
     return {
         "mode": "demo",
         "status": "warmup",
+        "state": "WORK",
         "reason": reason,
         "disclaimer": "Demo model trained on synthetic data.",
         "disclaimer_ru": "Демо-модель обучена на синтетических данных.",
-        "active_minutes": active_minutes,
+        "current_effectiveness": None,
+        "decline_15m": None,
+        "decline_30m": None,
+        "decline_60m": None,
+        "break_benefit": None,
+        "recommended_action": "CONTINUE",
+        "recommended_break_minutes": None,
+        "next_break_eta_minutes": None,
+        "policy_source": "WARMUP",
+        "active_minutes": telemetry_minutes,
+        "telemetry_available_minutes": diagnostics.get("telemetry_available_minutes", telemetry_minutes),
         "latency_ms": round((time.perf_counter() - started) * 1000, 2),
+        "diagnostics": diagnostics,
     }
+
+
+def _diagnostics(now_local: datetime, db_path: Path) -> dict[str, object]:
+    return {
+        "model_loaded": False,
+        "model_version": None,
+        "last_inference_at": now_local.isoformat(),
+        "next_inference_at": (now_local + timedelta(seconds=INFERENCE_INTERVAL_SECONDS)).isoformat(),
+        "telemetry_available_minutes": 0.0,
+        "feature_rows_available": 0,
+        "feature_vector_valid": False,
+        "warmup_reason": None,
+        "last_inference_error": None,
+        "db_path": str(db_path),
+        "local_timezone_offset": now_local.strftime("%z"),
+    }
+
+
+def _telemetry_span_minutes(events: list[dict[str, object]]) -> float:
+    if len(events) < 2:
+        return 0.0
+    first = pd.to_datetime(events[0]["ts_start"])
+    last = pd.to_datetime(events[-1].get("ts_end") or events[-1]["ts_start"])
+    return max(float((last - first).total_seconds() / 60), 0.0)
 
 
 def _resolution_minutes(df: pd.DataFrame) -> float:
@@ -120,21 +312,36 @@ def _resolution_minutes(df: pd.DataFrame) -> float:
     return float(diffs.median()) if not diffs.empty else 1.0
 
 
+def _effectiveness_to_100(value: float) -> float:
+    return float(max(0, min(((value - 1) / 4) * 100, 100)))
+
+
+def _trend_pressure(row: dict[str, object]) -> float:
+    falling_input = 1.0 if float(row.get("input_rate_delta_5_30", 0.0)) < -0.1 else 0.0
+    rising_switches = min(max(float(row.get("switch_rate_delta_5_30", 0.0)) * 4, 0), 1)
+    rising_idle = min(max(float(row.get("idle_ratio_delta_5_30", 0.0)) * 3, 0), 1)
+    long_session = min(max((float(row.get("session_duration_vs_baseline", 1.0)) - 1.2) / 1.5, 0), 1)
+    return float(max(0, min((falling_input + rising_switches + rising_idle + long_session) / 4, 1)))
+
+
 def _signals(row: dict[str, object]) -> list[dict[str, object]]:
-    keys = [
-        "session_duration_vs_baseline",
-        "switch_rate_delta_5_30",
-        "input_rate_slope_30m",
-        "active_ratio_vs_baseline",
-        "workload_last_4h",
+    signals = [
+        ("Непрерывная работа", "continuous_work_minutes", "мин"),
+        ("Переключения 5/30 мин", "switch_rate_delta_5_30", ""),
+        ("Активность ввода 5/30 мин", "input_rate_delta_5_30", ""),
+        ("Idle trend", "idle_ratio_delta_5_30", ""),
+        ("Сессия к baseline", "session_duration_vs_baseline", "x"),
     ]
-    return [{"name": key, "value": round(float(row.get(key, 0.0)), 3)} for key in keys]
+    return [
+        {"label": label, "name": key, "value": round(float(row.get(key, 0.0)), 3), "unit": unit}
+        for label, key, unit in signals
+    ]
 
 
 def main() -> None:
-    print(json.dumps(run_demo_inference(), indent=2, ensure_ascii=False, default=str))
+    persist = "--no-persist" not in sys.argv
+    print(json.dumps(run_demo_inference(persist=persist), indent=2, ensure_ascii=False, default=str))
 
 
 if __name__ == "__main__":
     main()
-

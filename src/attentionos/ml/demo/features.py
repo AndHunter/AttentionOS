@@ -11,7 +11,7 @@ import numpy as np
 import pandas as pd
 
 
-WINDOWS = (5, 15, 30, 60)
+WINDOWS = (1, 5, 15, 30, 60, 120)
 CATEGORICAL_FEATURES = ["task_category"]
 
 
@@ -39,14 +39,29 @@ def feature_schema() -> FeatureSchema:
         "focus_time_today",
         "workload_last_2h",
         "workload_last_4h",
+        "work_episode_elapsed_minutes",
+        "active_time_since_work_start",
+        "idle_time_since_work_start",
+        "switches_since_work_start",
+        "input_events_since_work_start",
+        "focus_blocks_since_work_start",
+        "breaks_since_work_start",
+        "break_count_today",
+        "total_break_time_today",
+        "last_break_duration",
+        "current_app_duration",
         "task_duration",
         "task_switches_today",
         "difficulty",
+        "input_rate_delta_1_15",
+        "input_rate_delta_5_30",
         "keyboard_rate_delta_5_30",
         "mouse_rate_delta_5_30",
         "switch_rate_delta_5_30",
+        "switch_rate_delta_15_60",
         "active_ratio_delta_5_30",
         "idle_ratio_delta_5_30",
+        "app_entropy_delta_5_30",
         "input_rate_slope_15m",
         "input_rate_slope_30m",
         "switch_rate_slope_30m",
@@ -68,7 +83,7 @@ def feature_schema() -> FeatureSchema:
                 f"unique_apps_{window}m",
             ]
         )
-    numeric.extend(["app_entropy_15m", "app_entropy_30m"])
+    numeric.extend(["app_entropy_5m", "app_entropy_15m", "app_entropy_30m", "app_entropy_60m", "app_entropy_120m"])
     return FeatureSchema(numeric=numeric, categorical=CATEGORICAL_FEATURES.copy())
 
 
@@ -119,8 +134,20 @@ def build_features_at(events: pd.DataFrame, at_time: datetime | pd.Timestamp) ->
     row["workload_last_2h"] = _active_minutes(causal, at, 120)
     row["workload_last_4h"] = _active_minutes(causal, at, 240)
     row["current_session_duration"] = _current_session_minutes(causal)
+    row["current_app_duration"] = row["current_session_duration"]
     row["continuous_work_minutes"] = _continuous_work_minutes(causal)
     row["time_since_last_break"] = _time_since_last_break(causal)
+    row["work_episode_elapsed_minutes"] = row["time_since_last_break"]
+    row["active_time_since_work_start"] = _active_since_current_work_start(causal)
+    row["idle_time_since_work_start"] = _idle_since_current_work_start(causal)
+    row["switches_since_work_start"] = _switches_since_current_work_start(causal)
+    row["input_events_since_work_start"] = _input_since_current_work_start(causal)
+    row["focus_blocks_since_work_start"] = 1 if row["continuous_work_minutes"] >= 25 else 0
+    row["breaks_since_work_start"] = 0
+    breaks = _break_durations(causal)
+    row["break_count_today"] = len(breaks)
+    row["total_break_time_today"] = float(sum(breaks))
+    row["last_break_duration"] = float(breaks[-1]) if breaks else 0.0
     row["task_duration"] = _current_task_minutes(causal, str(latest.get("task_category", "other")))
     row["task_switches_today"] = int((causal["task_category"] != causal["task_category"].shift()).sum() - 1)
     row["minutes_since_wake_proxy"] = elapsed
@@ -129,11 +156,19 @@ def build_features_at(events: pd.DataFrame, at_time: datetime | pd.Timestamp) ->
         window_df = _window(causal, at, window)
         _add_window(row, window_df, window)
 
+    row["input_rate_delta_1_15"] = (row["keyboard_rate_1m"] + row["mouse_rate_1m"]) - (
+        row["keyboard_rate_15m"] + row["mouse_rate_15m"]
+    )
+    row["input_rate_delta_5_30"] = (row["keyboard_rate_5m"] + row["mouse_rate_5m"]) - (
+        row["keyboard_rate_30m"] + row["mouse_rate_30m"]
+    )
     row["keyboard_rate_delta_5_30"] = row["keyboard_rate_5m"] - row["keyboard_rate_30m"]
     row["mouse_rate_delta_5_30"] = row["mouse_rate_5m"] - row["mouse_rate_30m"]
     row["switch_rate_delta_5_30"] = row["switch_rate_5m"] - row["switch_rate_30m"]
+    row["switch_rate_delta_15_60"] = row["switch_rate_15m"] - row["switch_rate_60m"]
     row["active_ratio_delta_5_30"] = row["active_ratio_5m"] - row["active_ratio_30m"]
     row["idle_ratio_delta_5_30"] = row["idle_ratio_5m"] - row["idle_ratio_30m"]
+    row["app_entropy_delta_5_30"] = row["app_entropy_5m"] - row["app_entropy_30m"]
     row["input_rate_slope_15m"] = _slope_rates(causal, at, 15, "input")
     row["input_rate_slope_30m"] = _slope_rates(causal, at, 30, "input")
     row["switch_rate_slope_30m"] = _slope_rates(causal, at, 30, "switch")
@@ -152,7 +187,7 @@ def real_events_to_frame(events: list[dict[str, object]]) -> pd.DataFrame:
     """Convert SQLite activity rows to the feature-builder event shape."""
     rows = []
     for event in events:
-        ts = pd.to_datetime(event["ts_start"])
+        ts = _to_local_timestamp(event["ts_start"])
         process = str(event.get("process_name") or "unknown").lower()
         task = str(event.get("task_label") or "other").lower()
         rows.append(
@@ -171,6 +206,15 @@ def real_events_to_frame(events: list[dict[str, object]]) -> pd.DataFrame:
             }
         )
     return pd.DataFrame(rows)
+
+
+def _to_local_timestamp(value: object) -> pd.Timestamp:
+    """Treat stored naive SQLite timestamps as UTC and expose local computer time."""
+    ts = pd.to_datetime(value)
+    if ts.tzinfo is None:
+        ts = ts.tz_localize("UTC")
+    local_tz = datetime.now().astimezone().tzinfo
+    return ts.tz_convert(local_tz).tz_localize(None)
 
 
 def load_dataset(path: Path) -> pd.DataFrame:
@@ -211,7 +255,7 @@ def _add_window(row: dict[str, object], df: pd.DataFrame, minutes: int) -> None:
     if df.empty:
         for key in ["active_ratio", "idle_ratio", "switch_count", "switch_rate", "keyboard_rate", "mouse_rate", "unique_apps"]:
             row[f"{key}_{minutes}m"] = 0.0
-        if minutes in (15, 30):
+        if minutes in (5, 15, 30, 60, 120):
             row[f"app_entropy_{minutes}m"] = 0.0
         return
     row[f"active_ratio_{minutes}m"] = float(df["active"].mean())
@@ -222,7 +266,7 @@ def _add_window(row: dict[str, object], df: pd.DataFrame, minutes: int) -> None:
     row[f"keyboard_rate_{minutes}m"] = float(df["keyboard_events"].sum()) / denom
     row[f"mouse_rate_{minutes}m"] = float(df["mouse_events"].sum()) / denom
     row[f"unique_apps_{minutes}m"] = int(df["app"].nunique())
-    if minutes in (15, 30):
+    if minutes in (5, 15, 30, 60, 120):
         counts = df["app"].value_counts(normalize=True)
         row[f"app_entropy_{minutes}m"] = float(-(counts * np.log2(counts + 1e-9)).sum())
 
@@ -261,6 +305,69 @@ def _time_since_last_break(df: pd.DataFrame) -> float:
             break
         count += 1
     return count * _resolution_minutes(df)
+
+
+def _current_work_episode(df: pd.DataFrame, min_break_minutes: float = 5.0) -> pd.DataFrame:
+    if df.empty:
+        return df
+    res = _resolution_minutes(df)
+    idle_run = 0.0
+    cutoff_index = -1
+    for idx in range(len(df) - 1, -1, -1):
+        row = df.iloc[idx]
+        if row["idle"] > 0 or str(row.get("task_category", "")).lower() == "rest":
+            idle_run += res
+            if idle_run >= min_break_minutes:
+                cutoff_index = idx
+                break
+        else:
+            idle_run = 0.0
+    if cutoff_index < 0:
+        return df
+    return df.iloc[cutoff_index + 1 :].copy()
+
+
+def _break_durations(df: pd.DataFrame, min_break_minutes: float = 5.0) -> list[float]:
+    if df.empty:
+        return []
+    res = _resolution_minutes(df)
+    breaks: list[float] = []
+    current = 0.0
+    for _, row in df.iterrows():
+        is_break = row["idle"] > 0 or str(row.get("task_category", "")).lower() == "rest"
+        if is_break:
+            current += res
+            continue
+        if current >= min_break_minutes:
+            breaks.append(current)
+        current = 0.0
+    if current >= min_break_minutes:
+        breaks.append(current)
+    return breaks
+
+
+def _active_since_current_work_start(df: pd.DataFrame) -> float:
+    episode = _current_work_episode(df)
+    return float(episode["active"].sum() * _resolution_minutes(df)) if not episode.empty else 0.0
+
+
+def _idle_since_current_work_start(df: pd.DataFrame) -> float:
+    episode = _current_work_episode(df)
+    return float(episode["idle"].sum() * _resolution_minutes(df)) if not episode.empty else 0.0
+
+
+def _switches_since_current_work_start(df: pd.DataFrame) -> int:
+    episode = _current_work_episode(df)
+    if episode.empty:
+        return 0
+    return int(max((episode["app"] != episode["app"].shift()).sum() - 1, 0))
+
+
+def _input_since_current_work_start(df: pd.DataFrame) -> int:
+    episode = _current_work_episode(df)
+    if episode.empty:
+        return 0
+    return int(episode["keyboard_events"].sum() + episode["mouse_events"].sum())
 
 
 def _current_task_minutes(df: pd.DataFrame, task: str) -> float:
@@ -316,4 +423,3 @@ def _task_category(task: str) -> str:
     if "code" in task or "coding" in task:
         return "coding"
     return "other"
-

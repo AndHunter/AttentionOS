@@ -45,16 +45,37 @@ def test_rolling_features_and_no_future_leakage() -> None:
 
 def test_feature_schema_has_required_demo_features() -> None:
     names = set(feature_schema().all)
-    assert {"active_ratio_5m", "active_ratio_15m", "active_ratio_30m", "active_ratio_60m"} <= names
-    assert {"keyboard_rate_delta_5_30", "input_rate_slope_30m", "switch_rate_vs_baseline"} <= names
+    assert {"active_ratio_1m", "active_ratio_5m", "active_ratio_15m", "active_ratio_30m", "active_ratio_60m", "active_ratio_120m"} <= names
+    assert {"input_rate_delta_1_15", "input_rate_delta_5_30", "input_rate_slope_30m", "switch_rate_vs_baseline"} <= names
+    assert {"work_episode_elapsed_minutes", "break_count_today", "last_break_duration"} <= names
     assert "task_category" in names
 
 
 def test_recommendation_sanity_scenarios() -> None:
-    stable = recommend_action(4.0, 0.12, 0.18, 30, 30, 60)
-    long = recommend_action(2.2, 0.78, 0.72, 150, 150, 260)
-    after_break = recommend_action(3.5, 0.22, 0.16, 18, 18, 120)
+    stable = recommend_action(4.0, 0.08, 0.12, 0.18, 0.12, 30, 30, 60)
+    long = recommend_action(2.2, 0.70, 0.78, 0.86, 0.72, 150, 150, 260)
+    after_break = recommend_action(3.5, 0.12, 0.22, 0.28, 0.16, 18, 18, 120)
     assert stable.action == "CONTINUE"
-    assert long.action in {"BREAK_10", "BREAK_20"}
+    assert long.state == "BREAK_RECOMMENDED"
+    assert long.policy_source == "FALLBACK"
+    assert long.action.startswith("BREAK")
     assert after_break.action == "CONTINUE"
 
+
+def test_soft_decline_can_trigger_break() -> None:
+    result = recommend_action(
+        3.0,
+        0.40,
+        0.50,
+        0.62,
+        0.45,
+        100,
+        100,
+        180,
+        input_rate_delta_5_30=-1.0,
+        switch_rate_delta_5_30=0.4,
+        idle_ratio_delta_5_30=0.3,
+        session_duration_vs_baseline=2.2,
+    )
+    assert result.state == "BREAK_RECOMMENDED"
+    assert result.break_benefit >= 5.5

@@ -31,17 +31,27 @@ type UiText = typeof en
 type DemoPrediction = {
   mode: string
   status: 'ready' | 'warmup'
+  state?: string
   reason?: string
   disclaimer?: string
   disclaimer_ru?: string
   model_version?: string
   current_effectiveness?: number
+  decline_15m?: number
+  decline_30m?: number
+  decline_60m?: number
   decline_probability?: number
   break_benefit?: number
+  recommended_action?: string
+  recommended_break_minutes?: number | null
+  next_break_eta_minutes?: number | null
+  policy_source?: string
   active_minutes?: number
+  telemetry_available_minutes?: number
   latency_ms?: number
-  recommendation?: { action: string; title: string; reason: string; confidence: number }
-  signals?: { name: string; value: number }[]
+  recommendation?: { action: string; state?: string; title: string; reason: string; confidence: number; recommended_break_minutes?: number | null; break_benefit?: number; policy_source?: string }
+  diagnostics?: Record<string, unknown>
+  signals?: { name: string; label?: string; value: number; unit?: string }[]
   metadata?: { samples?: number; metrics?: Record<string, Record<string, number>>; feature_importance?: Record<string, number> }
 }
 
@@ -55,7 +65,7 @@ const ru = {
   settings: '\u041d\u0430\u0441\u0442\u0440\u043e\u0439\u043a\u0438',
   currentState: '\u0422\u0435\u043a\u0443\u0449\u0435\u0435 \u0441\u043e\u0441\u0442\u043e\u044f\u043d\u0438\u0435',
   timeline: '\u0422\u0430\u0439\u043c\u043b\u0430\u0439\u043d',
-  timelineHint: '\u0420\u0430\u0431\u043e\u0447\u0438\u0439 \u0434\u0435\u043d\u044c 09:00-18:00 \u043f\u043e \u043b\u043e\u043a\u0430\u043b\u044c\u043d\u043e\u0439 \u0442\u0435\u043b\u0435\u043c\u0435\u0442\u0440\u0438\u0438.',
+  timelineHint: '24 \u0447\u0430\u0441\u0430 \u043b\u043e\u043a\u0430\u043b\u044c\u043d\u043e\u0433\u043e \u0434\u043d\u044f \u043f\u043e telemetry.',
   today: '\u0421\u0435\u0433\u043e\u0434\u043d\u044f',
   noData: '\u0414\u0430\u043d\u043d\u044b\u0445 \u043f\u043e\u043a\u0430 \u043d\u0435\u0442',
   noDataText: '\u0417\u0430\u043f\u0443\u0441\u0442\u0438 \u043e\u0442\u0441\u043b\u0435\u0436\u0438\u0432\u0430\u043d\u0438\u0435, \u0438 \u0437\u0434\u0435\u0441\u044c \u043f\u043e\u044f\u0432\u0438\u0442\u0441\u044f \u0442\u0430\u0439\u043c\u043b\u0430\u0439\u043d.',
@@ -109,7 +119,7 @@ const ru = {
 }
 const en = {
   subtitle: 'Local-first focus analytics', localOnly: 'Local only', notifications: 'Notifications', settings: 'Settings',
-  currentState: 'Current state', timeline: 'Timeline', timelineHint: '09:00-18:00 workday view from local telemetry.',
+  currentState: 'Current state', timeline: 'Timeline', timelineHint: 'Full 24-hour local day from telemetry.',
   today: 'Today', noData: 'No focus data yet', noDataText: 'Start tracking and AttentionOS will build your timeline.',
   activityPattern: 'Activity Pattern', topApps: 'Top Apps', recentSessions: 'Recent Sessions', time: 'Time', app: 'Application',
   duration: 'Duration', task: 'Task', currentTask: 'Current task', addTask: 'Add', startTracking: 'Start tracking',
@@ -145,6 +155,7 @@ function shiftDate(value: string, days: number) { const date = new Date(`${value
 function formatDate(value: string, language: 'en' | 'ru' = 'en') { return new Intl.DateTimeFormat(language === 'ru' ? 'ru-RU' : 'en', { weekday: 'short', month: 'short', day: 'numeric' }).format(new Date(`${value}T12:00:00`)) }
 function formatMinutes(minutes: number) { const h = Math.floor(minutes / 60); const m = minutes % 60; return h > 0 ? `${h}h ${String(m).padStart(2, '0')}m` : `${m}m` }
 function formatClock(minute: number) { return `${String(Math.floor(minute / 60)).padStart(2, '0')}:${String(minute % 60).padStart(2, '0')}` }
+function pct(value?: number | null) { return value == null ? '-' : `${Math.round(value * 100)}%` }
 function effectiveTheme(settings: RuntimeSettings | null) { return !settings || settings.preferences.theme === 'system' ? 'light' : settings.preferences.theme }
 async function ensureNotificationPermission() {
   let permissionGranted = await isPermissionGranted()
@@ -197,7 +208,7 @@ function App() {
     const timer = window.setInterval(async () => {
       if (!tracking || !settings?.notifications.break_recommendations) return
       try {
-        const notes = await invoke<NotificationPayload[]>('evaluate_recommendations')
+        const notes = await invoke<NotificationPayload[]>('get_notifications', { limit: 8 })
         setNotifications(notes)
         const newest = notes.find((item) => item.state === 'unread')
         if (newest && newest.id > lastToastId) {
@@ -234,8 +245,8 @@ function App() {
       {error && <div className="error">Could not load AttentionOS data: {error}</div>}
       <section className="tracking-card"><div className="tracking-status"><span className={tracking ? 'pulse-dot active' : 'pulse-dot'} /><strong>{tracking ? t.tracking : t.stopped}</strong></div><label className="task-select"><span>{t.currentTask}</span><select value={settings?.preferences.current_task_label ?? 'None'} onChange={(e) => setCurrentTask(e.target.value)}>{taskOptions.map((task) => <option value={task} key={task}>{task}</option>)}</select></label><div className="inline-input task-add"><input value={customTask} onChange={(e) => setCustomTask(e.target.value)} placeholder={t.addTask} /><button type="button" onClick={addTask}>{t.actions.add}</button></div><button type="button" className={`button ${tracking ? 'danger' : 'primary'}`} onClick={toggleTracking}>{tracking ? t.stopTracking : t.startTracking}</button><button type="button" className="button" onClick={() => setSelfReportOpen(true)}>{t.checkIn}</button></section>
       <section className="hero-grid"><article className="state-card"><div className="eyebrow">{translateMetric(dashboard?.current_state.label ?? t.currentState, lang(settings))} <span className="demo-badge" title={t.demoDisclaimer}>{t.demo}</span></div><h1>{loading ? t.loading : demoStateTitle(demoPrediction, lang(settings), dashboard?.current_state.value)}</h1><p>{demoPrediction?.status === 'ready' ? t.demoDisclaimer : translateMetricDetail(dashboard?.current_state.detail ?? '', lang(settings))}</p><div className="state-meta"><span>{formatDate(date, lang(settings))}</span><span>{dashboard?.event_count ?? 0} {lang(settings) === 'ru' ? '\u0441\u043e\u0431\u044b\u0442\u0438\u0439' : 'events'}</span></div></article><div className="metrics-grid">{(dashboard?.metrics ?? []).map((m) => <article className="metric-card" key={m.label}><div className="metric-label">{translateMetric(m.label, lang(settings))}</div><div className="metric-value">{m.value}</div><div className="metric-detail">{translateMetricDetail(m.detail, lang(settings))}</div></article>)}</div></section>
-      {demoPrediction && <section className="panel demo-panel"><div className="panel-header"><div><h2>{t.demoModel} <span className="demo-badge" title={t.demoDisclaimer}>{t.demo}</span></h2><p>{t.demoDisclaimer}</p></div><strong>{demoPrediction.model_version ?? 'demo-v1'}</strong></div><div className="demo-grid"><MetricPill label={t.effectiveness} value={demoPrediction.status === 'ready' ? `${demoPrediction.current_effectiveness?.toFixed(1)}/5` : t.collectingData} /><MetricPill label={t.declineRisk} value={demoPrediction.status === 'ready' ? `${Math.round((demoPrediction.decline_probability ?? 0) * 100)}%` : `${Math.round(demoPrediction.active_minutes ?? 0)}m`} /><MetricPill label={t.breakBenefit} value={demoPrediction.status === 'ready' ? `${Math.round((demoPrediction.break_benefit ?? 0) * 100)}%` : '-'} /><MetricPill label={t.recommendation} value={localizeDemoAction(demoPrediction.recommendation?.action ?? 'CONTINUE', lang(settings))} /></div>{demoPrediction.signals && <div className="signal-list">{demoPrediction.signals.slice(0, 5).map((signal) => <span key={signal.name}>{localizeSignal(signal.name, lang(settings))}: {signal.value}</span>)}</div>}</section>}
-      <section className="panel timeline-panel"><div className="panel-header"><div><h2>{t.timeline}</h2><p>{t.timelineHint}</p></div><div className="date-nav"><button type="button" onClick={() => setDate(shiftDate(date, -1))}>{'<'}</button><span>{date === todayIso() ? t.today : formatDate(date, lang(settings))}</span><button type="button" onClick={() => setDate(shiftDate(date, 1))}>{'>'}</button></div></div>{dashboard && dashboard.timeline.length > 0 ? <div className="timeline"><div className="timeline-track">{dashboard.timeline.map((segment, index) => { const dayStart = 9 * 60; const dayEnd = 18 * 60; const start = Math.max(segment.start_minute, dayStart); const end = Math.min(segment.end_minute, dayEnd); if (end <= dayStart || start >= dayEnd) return null; const left = ((start - dayStart) / (dayEnd - dayStart)) * 100; const width = Math.max(((end - start) / (dayEnd - dayStart)) * 100, 0.8); const selected = selectedSegment?.app === segment.app && selectedSegment?.start_minute === segment.start_minute; return <button type="button" className={`timeline-segment ${selected ? 'selected' : ''}`} key={`${segment.app}-${segment.start_minute}-${index}`} style={{ left: `${left}%`, width: `${width}%`, background: appColor.get(segment.app) }} title={`${segment.app} - ${formatMinutes(segment.duration_minutes)}`} onClick={() => setSelectedSegment(segment)} onMouseEnter={() => setSelectedSegment(segment)} /> })}</div><div className="timeline-axis"><span>09:00</span><span>12:00</span><span>15:00</span><span>18:00</span></div>{selectedSegment && <div className="timeline-detail"><strong>{selectedSegment.app}</strong><span>{formatClock(selectedSegment.start_minute)}-{formatClock(selectedSegment.end_minute)}</span><span>{formatMinutes(selectedSegment.duration_minutes)}</span><span>{t.task}: {selectedSegment.task ?? t.unassigned}</span></div>}</div> : <div className="empty-state"><h3>{t.noData}</h3><p>{t.noDataText}</p></div>}</section>
+      {demoPrediction && <section className="panel demo-panel"><div className="panel-header"><div><h2>{t.demoModel} <span className="demo-badge" title={t.demoDisclaimer}>{t.demo}</span></h2><p>{demoPrediction.status === 'ready' ? t.demoDisclaimer : (demoPrediction.reason ?? t.collectingData)}</p></div><strong>{demoPrediction.model_version ?? 'demo-v1'}</strong></div><div className="demo-grid"><MetricPill label={t.effectiveness} value={demoPrediction.status === 'ready' ? `${demoPrediction.current_effectiveness?.toFixed(0)}/100` : `${Math.round(demoPrediction.telemetry_available_minutes ?? demoPrediction.active_minutes ?? 0)}m`} /><MetricPill label={`${t.declineRisk} 15/30/60`} value={demoPrediction.status === 'ready' ? `${pct(demoPrediction.decline_15m)} / ${pct(demoPrediction.decline_30m)} / ${pct(demoPrediction.decline_60m)}` : '-'} /><MetricPill label={t.breakBenefit} value={demoPrediction.status === 'ready' ? `${(demoPrediction.break_benefit ?? 0).toFixed(1)}/10` : '-'} /><MetricPill label={t.recommendation} value={localizeDemoAction(demoPrediction.recommended_action ?? demoPrediction.recommendation?.action ?? 'CONTINUE', lang(settings), demoPrediction.recommended_break_minutes)} /></div>{demoPrediction.signals && <div className="signal-list">{demoPrediction.signals.slice(0, 5).map((signal) => <span key={signal.name}>{localizeSignal(signal.label ?? signal.name, lang(settings))}: {signal.value}{signal.unit ? ` ${signal.unit}` : ''}</span>)}</div>}</section>}
+      <section className="panel timeline-panel"><div className="panel-header"><div><h2>{t.timeline}</h2><p>{t.timelineHint}</p></div><div className="date-nav"><button type="button" onClick={() => setDate(shiftDate(date, -1))}>{'<'}</button><span>{date === todayIso() ? t.today : formatDate(date, lang(settings))}</span><button type="button" onClick={() => setDate(shiftDate(date, 1))}>{'>'}</button></div></div>{dashboard && dashboard.timeline.length > 0 ? <div className="timeline"><div className="timeline-track">{dashboard.timeline.map((segment, index) => { const dayStart = 0; const dayEnd = 24 * 60; const start = Math.max(segment.start_minute, dayStart); const end = Math.min(segment.end_minute, dayEnd); if (end <= dayStart || start >= dayEnd) return null; const left = ((start - dayStart) / (dayEnd - dayStart)) * 100; const width = Math.max(((end - start) / (dayEnd - dayStart)) * 100, 0.25); const selected = selectedSegment?.app === segment.app && selectedSegment?.start_minute === segment.start_minute; return <button type="button" className={`timeline-segment ${selected ? 'selected' : ''}`} key={`${segment.app}-${segment.start_minute}-${index}`} style={{ left: `${left}%`, width: `${width}%`, background: appColor.get(segment.app) }} title={`${segment.app} - ${formatMinutes(segment.duration_minutes)}`} onClick={() => setSelectedSegment(segment)} onMouseEnter={() => setSelectedSegment(segment)} /> })}</div><div className="timeline-axis"><span>00:00</span><span>06:00</span><span>12:00</span><span>18:00</span><span>24:00</span></div>{selectedSegment && <div className="timeline-detail"><strong>{selectedSegment.app}</strong><span>{formatClock(selectedSegment.start_minute)}-{formatClock(selectedSegment.end_minute)}</span><span>{formatMinutes(selectedSegment.duration_minutes)}</span><span>{t.task}: {selectedSegment.task ?? t.unassigned}</span></div>}</div> : <div className="empty-state"><h3>{t.noData}</h3><p>{t.noDataText}</p></div>}</section>
       <section className="analytics-grid"><article className="panel"><div className="panel-header"><div><h2>{t.activityPattern}</h2><p>{lang(settings) === 'ru' ? '\u0424\u043e\u043a\u0443\u0441 \u0438 \u0430\u043a\u0442\u0438\u0432\u043d\u043e\u0435 \u0432\u0440\u0435\u043c\u044f.' : 'Focused vs active minutes.'}</p></div></div><div className="bar-comparison"><Bar label="Focused" value={dashboard?.focused_minutes ?? 0} max={dashboard?.active_minutes ?? 1} lang={lang(settings)} /><Bar label="Active" value={dashboard?.active_minutes ?? 0} max={dashboard?.active_minutes ?? 1} lang={lang(settings)} /><Bar label="Switches" value={dashboard?.context_switches ?? 0} max={Math.max(dashboard?.context_switches ?? 0, 40)} lang={lang(settings)} /></div></article><article className="panel"><div className="panel-header"><div><h2>{t.topApps}</h2><p>{lang(settings) === 'ru' ? '\u041f\u043e \u0430\u043a\u0442\u0438\u0432\u043d\u043e\u043c\u0443 \u0432\u0440\u0435\u043c\u0435\u043d\u0438.' : 'Ranked by active foreground time.'}</p></div></div><div className="app-list">{(dashboard?.top_apps ?? []).length > 0 ? dashboard?.top_apps.map((app, index) => <div className="app-row" key={app.name}><span className="rank">{index + 1}</span><span className="app-name">{app.name}</span><span>{formatMinutes(app.duration_minutes)}</span><div className="progress"><span style={{ width: `${app.percent}%` }} /></div></div>) : <p className="muted">{t.noAppUsage}</p>}</div></article></section>
       <section className="panel"><div className="panel-header"><div><h2>{t.recentSessions}</h2><p>{lang(settings) === 'ru' ? '\u041f\u043e\u0441\u043b\u0435\u0434\u043d\u0438\u0435 \u0431\u043b\u043e\u043a\u0438 \u0440\u0430\u0431\u043e\u0442\u044b.' : 'Latest foreground work blocks.'}</p></div><span className="muted">SQLite: {dashboard?.db_path}</span></div><div className="sessions-table"><div className="table-head"><span>{t.time}</span><span>{t.app}</span><span>{t.duration}</span><span>{t.task}</span></div>{(dashboard?.recent_sessions ?? []).map((s) => <div className="table-row" key={`${s.time}-${s.application}-${s.duration_minutes}`}><span>{s.time}</span><span>{s.application}</span><span>{formatMinutes(s.duration_minutes)}</span><span>{s.task ?? t.unassigned}</span></div>)}</div></section>
       {notificationsOpen && <NotificationsDrawer notifications={notifications} markRead={markRead} close={() => setNotificationsOpen(false)} t={t} />}
@@ -325,15 +336,13 @@ function applyDemoMetric(dashboard: DashboardPayload, demo: DemoPrediction): Das
 }
 function demoStateTitle(demo: DemoPrediction | null, language: 'en' | 'ru', fallback?: string) {
   if (!demo || demo.status !== 'ready') return language === 'ru' ? '\u0421\u0431\u043e\u0440 \u0434\u0430\u043d\u043d\u044b\u0445' : (fallback ?? 'Collecting data')
-  const risk = demo.decline_probability ?? 0
-  const eff = demo.current_effectiveness ?? 3
-  if (risk >= 0.68) return language === 'ru' ? '\u0412\u0435\u0440\u043e\u044f\u0442\u043d\u043e\u0435 \u0441\u043d\u0438\u0436\u0435\u043d\u0438\u0435' : 'Possible decline'
-  if (eff >= 3.7) return language === 'ru' ? '\u0412\u044b\u0441\u043e\u043a\u0430\u044f \u044d\u0444\u0444\u0435\u043a\u0442\u0438\u0432\u043d\u043e\u0441\u0442\u044c' : 'High effectiveness'
-  return language === 'ru' ? '\u0421\u0442\u0430\u0431\u0438\u043b\u044c\u043d\u043e' : 'Stable'
+  if (demo.state === 'BREAK_RECOMMENDED') return language === 'ru' ? '\u041e\u0422\u0414\u041e\u0425\u041d\u0423\u0422\u042c' : 'BREAK'
+  return language === 'ru' ? '\u0420\u0410\u0411\u041e\u0422\u0410\u0422\u042c' : 'WORK'
 }
-function localizeDemoAction(action: string, language: 'en' | 'ru') {
+function localizeDemoAction(action: string, language: 'en' | 'ru', minutes?: number | null) {
   if (language !== 'ru') return action.replace('_', ' ')
-  return ({ CONTINUE: '\u041f\u0440\u043e\u0434\u043e\u043b\u0436\u0430\u0442\u044c', BREAK_10: '\u041f\u0435\u0440\u0435\u0440\u044b\u0432 10 \u043c\u0438\u043d', BREAK_20: '\u041f\u0435\u0440\u0435\u0440\u044b\u0432 20 \u043c\u0438\u043d', SWITCH_TASK: '\u0421\u043c\u0435\u043d\u0438\u0442\u044c \u0437\u0430\u0434\u0430\u0447\u0443' } as Record<string, string>)[action] ?? action
+  if (action.startsWith('BREAK')) return `\u041f\u0435\u0440\u0435\u0440\u044b\u0432 ${minutes ?? action.split('_')[1]} \u043c\u0438\u043d`
+  return ({ CONTINUE: '\u041f\u0440\u043e\u0434\u043e\u043b\u0436\u0430\u0442\u044c', SWITCH_TASK: '\u0421\u043c\u0435\u043d\u0438\u0442\u044c \u0437\u0430\u0434\u0430\u0447\u0443' } as Record<string, string>)[action] ?? action
 }
 function localizeSignal(name: string, language: 'en' | 'ru') {
   if (language !== 'ru') return name.replaceAll('_', ' ')

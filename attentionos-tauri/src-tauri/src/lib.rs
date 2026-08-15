@@ -300,6 +300,10 @@ fn evaluate_recommendations() -> Result<Vec<NotificationPayload>, String> {
 
 #[tauri::command]
 fn get_demo_ml_prediction() -> Result<serde_json::Value, String> {
+    run_demo_ml_once()
+}
+
+fn run_demo_ml_once() -> Result<serde_json::Value, String> {
     let mut command = python_collector_command()?;
     command
         .args(["-m", "attentionos.ml.demo.inference"])
@@ -319,6 +323,15 @@ fn get_demo_ml_prediction() -> Result<serde_json::Value, String> {
         ));
     }
     serde_json::from_slice(&output.stdout).map_err(|err| err.to_string())
+}
+
+fn spawn_demo_ml_scheduler() {
+    thread::spawn(|| loop {
+        if let Err(err) = run_demo_ml_once() {
+            eprintln!("Demo ML scheduler failed: {err}");
+        }
+        thread::sleep(Duration::from_secs(60));
+    });
 }
 
 #[tauri::command]
@@ -1043,6 +1056,7 @@ pub fn run() {
                 &handle,
                 load_runtime_settings().preferences.launch_on_startup,
             )?;
+            spawn_demo_ml_scheduler();
             let show = MenuItem::with_id(app, "show", "Show AttentionOS", true, None::<&str>)?;
             let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
             let menu = Menu::with_items(app, &[&show, &quit])?;
