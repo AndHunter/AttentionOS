@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import pandas as pd
 
+from datetime import datetime, timedelta, timezone
+
+from attentionos.ml.demo.inference import _active_break_lock
 from attentionos.ml.demo.features import build_features_at, build_training_windows, feature_schema
 from attentionos.ml.demo.recommendation_engine import recommend_action
 from attentionos.ml.synthetic.generate import generate_dataset
@@ -79,3 +82,28 @@ def test_soft_decline_can_trigger_break() -> None:
     )
     assert result.state == "BREAK_RECOMMENDED"
     assert result.break_benefit >= 5.5
+
+
+def test_break_recommendation_is_locked_for_duration(tmp_path) -> None:
+    import sqlite3
+
+    db = tmp_path / "attentionos.db"
+    conn = sqlite3.connect(db)
+    conn.execute(
+        "CREATE TABLE recommendations ("
+        "id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp TEXT NOT NULL, recommended_action TEXT, "
+        "recommended_duration INTEGER, accepted INTEGER DEFAULT 0, started_at TEXT, completed_at TEXT, actual_duration REAL)"
+    )
+    now = datetime(2026, 1, 1, 12, 10, tzinfo=timezone.utc)
+    conn.execute(
+        "INSERT INTO recommendations (timestamp, recommended_action, recommended_duration, accepted) VALUES (?1, 'BREAK_15', 15, 0)",
+        ((now - timedelta(minutes=5)).replace(tzinfo=None).isoformat(sep=" "),),
+    )
+    conn.commit()
+    conn.close()
+
+    lock = _active_break_lock(db, now)
+    assert lock is not None
+    assert lock["action"] == "BREAK_15"
+    assert lock["minutes"] == 15
+    assert _active_break_lock(db, now + timedelta(minutes=11)) is None

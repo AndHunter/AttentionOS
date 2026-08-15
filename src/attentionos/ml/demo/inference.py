@@ -6,6 +6,7 @@ import json
 import sqlite3
 import sys
 import time
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -83,6 +84,20 @@ def run_demo_inference(
             idle_ratio_delta_5_30=float(row["idle_ratio_delta_5_30"]),
             session_duration_vs_baseline=float(row["session_duration_vs_baseline"]),
         )
+        break_lock = _active_break_lock(db, now_local)
+        if break_lock is not None:
+            recommendation = replace(
+                recommendation,
+                action=break_lock["action"],
+                state="BREAK_RECOMMENDED",
+                title="Break in progress",
+                reason=f"break_lock: recommendation is held until {break_lock['until_local']}.",
+                confidence=max(recommendation.confidence, 0.9),
+                recommended_break_minutes=break_lock["minutes"],
+                break_benefit=max(recommendation.break_benefit, float(break_lock["benefit"])),
+                next_break_eta_minutes=0,
+                policy_source="FALLBACK",
+            )
         result = {
             "mode": "demo",
             "status": "ready",
@@ -216,6 +231,7 @@ def _persist_prediction(db_path: Path, result: dict[str, object], now_local: dat
                 "VALUES (?1, 'AttentionOS', ?2, 'unread', NULL, 'ml_break_recommendation', ?3)",
                 (now_utc, body, json.dumps({"source": "demo_ml", "prediction": result.get("recommended_action")})),
             )
+            _show_windows_notification("AttentionOS", body)
         conn.commit()
     finally:
         conn.close()
@@ -249,6 +265,46 @@ def _should_notify_break(conn: sqlite3.Connection) -> bool:
         return True
     previous = str(row[0] or "")
     return not previous.startswith("BREAK")
+
+
+def _active_break_lock(db_path: Path, now_local: datetime) -> dict[str, object] | None:
+    if not db_path.exists():
+        return None
+    conn = sqlite3.connect(db_path)
+    try:
+        _ensure_ml_tables(conn)
+        row = conn.execute(
+            "SELECT timestamp, recommended_action, recommended_duration FROM recommendations "
+            "WHERE recommended_action LIKE 'BREAK_%' ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+    finally:
+        conn.close()
+    if row is None:
+        return None
+    created_utc = datetime.fromisoformat(str(row[0])).replace(tzinfo=timezone.utc)
+    minutes = int(row[2] or 0)
+    if minutes <= 0:
+        return None
+    until_utc = created_utc + timedelta(minutes=minutes)
+    now_utc = now_local.astimezone(timezone.utc)
+    if now_utc >= until_utc:
+        return None
+    action = str(row[1] or f"BREAK_{minutes}")
+    return {
+        "action": action,
+        "minutes": minutes,
+        "benefit": 7.0,
+        "until_local": until_utc.astimezone(now_local.tzinfo).strftime("%H:%M"),
+    }
+
+
+def _show_windows_notification(title: str, body: str) -> None:
+    try:
+        from attentionos.notifications.windows import WindowsNotifier
+
+        WindowsNotifier().show(title, body)
+    except Exception:
+        pass
 
 
 def _warmup(
