@@ -158,7 +158,7 @@ impl Default for RuntimeSettingsPayload {
                 break_recommendations: true,
                 performance_warnings: false,
                 minimum_interval_minutes: 30,
-                live_check_interval_seconds: 60,
+                live_check_interval_seconds: 300,
                 do_not_disturb_start: "23:00".to_string(),
                 do_not_disturb_end: "08:00".to_string(),
             },
@@ -300,7 +300,16 @@ fn evaluate_recommendations() -> Result<Vec<NotificationPayload>, String> {
 
 #[tauri::command]
 fn get_demo_ml_prediction() -> Result<serde_json::Value, String> {
-    run_demo_ml_once()
+    get_latest_demo_ml_prediction().or_else(|_| {
+        Ok(serde_json::json!({
+            "mode": "demo",
+            "status": "warmup",
+            "state": "WORK",
+            "reason": "Prediction is not ready yet. Background ML will update it.",
+            "recommended_action": "CONTINUE",
+            "policy_source": "WARMUP"
+        }))
+    })
 }
 
 fn run_demo_ml_once() -> Result<serde_json::Value, String> {
@@ -309,7 +318,8 @@ fn run_demo_ml_once() -> Result<serde_json::Value, String> {
         .args(["-m", "attentionos.ml.demo.inference"])
         .stdin(Stdio::null())
         .stderr(Stdio::from(open_collector_log("demo_ml_stderr.log")?))
-        .env("PYTHONUTF8", "1");
+        .env("PYTHONUTF8", "1")
+        .env("PYTHONWARNINGS", "ignore");
     #[cfg(windows)]
     command.creation_flags(CREATE_NO_WINDOW);
     let output = command
@@ -326,12 +336,84 @@ fn run_demo_ml_once() -> Result<serde_json::Value, String> {
 }
 
 fn spawn_demo_ml_scheduler() {
-    thread::spawn(|| loop {
-        if let Err(err) = run_demo_ml_once() {
-            eprintln!("Demo ML scheduler failed: {err}");
+    thread::spawn(|| {
+        thread::sleep(Duration::from_secs(20));
+        loop {
+            if let Err(err) = run_demo_ml_once() {
+                eprintln!("Demo ML scheduler failed: {err}");
+            }
+            let settings = load_runtime_settings();
+            let interval = settings
+                .notifications
+                .live_check_interval_seconds
+                .clamp(60, 1800) as u64;
+            thread::sleep(Duration::from_secs(interval));
         }
-        thread::sleep(Duration::from_secs(60));
     });
+}
+
+fn get_latest_demo_ml_prediction() -> Result<serde_json::Value, String> {
+    let db_path = attentionos_db_path()?;
+    if !db_path.exists() {
+        return Err("Database does not exist".to_string());
+    }
+    let conn = Connection::open(db_path).map_err(|err| err.to_string())?;
+    let exists: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'ml_predictions'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap_or(0);
+    if exists == 0 {
+        return Err("No prediction table yet".to_string());
+    }
+    let mut stmt = conn
+        .prepare(
+            "SELECT timestamp, model_version, effectiveness, decline_15m, decline_30m, decline_60m, \
+             break_benefit, recommended_action, recommended_break_minutes, next_break_eta, confidence, policy_source \
+             FROM ml_predictions ORDER BY id DESC LIMIT 1",
+        )
+        .map_err(|err| err.to_string())?;
+    let prediction = stmt
+        .query_row([], |row| {
+            let action: String = row.get(7)?;
+            let break_minutes: Option<i64> = row.get(8)?;
+            let confidence: Option<f64> = row.get(10)?;
+            let policy_source: Option<String> = row.get(11)?;
+            Ok(serde_json::json!({
+                "mode": "demo",
+                "status": "ready",
+                "state": if action.starts_with("BREAK") { "BREAK_RECOMMENDED" } else { "WORK" },
+                "model_version": row.get::<_, Option<String>>(1)?.unwrap_or_else(|| "demo-v1".to_string()),
+                "current_effectiveness": row.get::<_, Option<f64>>(2)?,
+                "decline_15m": row.get::<_, Option<f64>>(3)?,
+                "decline_30m": row.get::<_, Option<f64>>(4)?,
+                "decline_60m": row.get::<_, Option<f64>>(5)?,
+                "decline_probability": row.get::<_, Option<f64>>(4)?,
+                "break_benefit": row.get::<_, Option<f64>>(6)?,
+                "recommended_action": action,
+                "recommended_break_minutes": break_minutes,
+                "next_break_eta_minutes": row.get::<_, Option<i64>>(9)?,
+                "policy_source": policy_source.clone().unwrap_or_else(|| "MODEL".to_string()),
+                "latency_ms": 0,
+                "recommendation": {
+                    "action": action,
+                    "state": if action.starts_with("BREAK") { "BREAK_RECOMMENDED" } else { "WORK" },
+                    "title": if action.starts_with("BREAK") { "Break recommended" } else { "Work" },
+                    "reason": "Latest persisted background ML prediction.",
+                    "confidence": confidence.unwrap_or(0.0),
+                    "recommended_break_minutes": break_minutes,
+                    "policy_source": policy_source.unwrap_or_else(|| "MODEL".to_string())
+                },
+                "diagnostics": {
+                    "last_inference_at": row.get::<_, Option<String>>(0)?,
+                    "source": "sqlite_cache"
+                }
+            }))
+        })
+        .map_err(|err| err.to_string())?;
+    Ok(prediction)
 }
 
 #[tauri::command]
