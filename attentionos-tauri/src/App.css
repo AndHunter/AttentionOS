@@ -386,6 +386,10 @@
   margin-top: 12px;
 }
 
+.daily-summary {
+  margin-top: 14px;
+}
+
 .utility-list {
   display: grid;
   gap: 6px;
@@ -445,6 +449,13 @@
   height: auto;
   border-radius: 0;
   background: color-mix(in srgb, var(--warning) 34%, transparent);
+}
+
+.state-history span.recommendation {
+  width: 10px;
+  height: 10px;
+  background: var(--warning);
+  box-shadow: 0 0 0 4px color-mix(in srgb, var(--warning) 18%, transparent);
 }
 
 .state-history i {

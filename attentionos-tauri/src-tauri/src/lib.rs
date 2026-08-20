@@ -64,6 +64,21 @@ struct StatePoint {
     effectiveness: f64,
     decline_risk: f64,
     state: String,
+    marker: Option<String>,
+    break_benefit: Option<f64>,
+}
+
+#[derive(Debug, Serialize)]
+struct DailySummaryPayload {
+    work_minutes: i64,
+    effective_minutes_estimate: i64,
+    break_count: i64,
+    recommendation_count: i64,
+    accepted_count: i64,
+    ignored_count: i64,
+    average_decline_risk: f64,
+    recovered_effective_minutes_estimate: i64,
+    best_period: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -81,6 +96,7 @@ struct DashboardPayload {
     top_apps: Vec<AppUsage>,
     recent_sessions: Vec<RecentSession>,
     state_history: Vec<StatePoint>,
+    daily_summary: DailySummaryPayload,
 }
 
 #[derive(Debug, Serialize)]
@@ -1419,9 +1435,14 @@ fn load_events_for_day(conn: &Connection, date: &str) -> Result<Vec<EventRow>, S
 }
 
 fn build_dashboard(date: String, db_path: PathBuf, events: Vec<EventRow>) -> DashboardPayload {
-    let state_history = Connection::open(&db_path)
+    let (state_history, daily_summary_from_db) = Connection::open(&db_path)
         .ok()
-        .map(|conn| state_history(&conn, &date).unwrap_or_default())
+        .map(|conn| {
+            (
+                state_history(&conn, &date).unwrap_or_default(),
+                daily_summary_from_db(&conn, &date),
+            )
+        })
         .unwrap_or_default();
     let timed_events = timed_events(&events);
     let event_count = events.len() as i64;
@@ -1442,6 +1463,20 @@ fn build_dashboard(date: String, db_path: PathBuf, events: Vec<EventRow>) -> Das
 
     let focused_minutes = active_seconds_to_minutes(focused_seconds);
     let active_minutes = active_seconds_to_minutes(active_seconds);
+    let daily_summary = DailySummaryPayload {
+        work_minutes: active_minutes,
+        effective_minutes_estimate: daily_summary_from_db
+            .average_effectiveness
+            .map(|value| ((active_minutes as f64) * (value / 100.0).clamp(0.0, 1.0)).round() as i64)
+            .unwrap_or(active_minutes),
+        break_count: daily_summary_from_db.break_count,
+        recommendation_count: daily_summary_from_db.recommendation_count,
+        accepted_count: daily_summary_from_db.accepted_count,
+        ignored_count: daily_summary_from_db.ignored_count,
+        average_decline_risk: daily_summary_from_db.average_decline_risk,
+        recovered_effective_minutes_estimate: daily_summary_from_db.recovered_effective_minutes_estimate,
+        best_period: best_work_block(&recent_sessions),
+    };
     let state_label = if event_count == 0 {
         "No data yet"
     } else if focused_minutes >= 90 && context_switches < 30 {
@@ -1499,6 +1534,7 @@ fn build_dashboard(date: String, db_path: PathBuf, events: Vec<EventRow>) -> Das
         top_apps,
         recent_sessions,
         state_history,
+        daily_summary,
     }
 }
 
@@ -1699,7 +1735,7 @@ fn state_history(conn: &Connection, date: &str) -> Result<Vec<StatePoint>, Strin
     }
     let mut stmt = conn
         .prepare(
-            "SELECT timestamp, effectiveness, decline_30m, recommended_action \
+            "SELECT timestamp, effectiveness, decline_30m, recommended_action, break_benefit \
              FROM ml_predictions \
              WHERE substr(datetime(timestamp, 'localtime'), 1, 10) = ?1 \
              ORDER BY timestamp ASC",
@@ -1709,20 +1745,105 @@ fn state_history(conn: &Connection, date: &str) -> Result<Vec<StatePoint>, Strin
         .query_map(params![date], |row| {
             let timestamp: String = row.get(0)?;
             let action: Option<String> = row.get(3)?;
+            let action_value = action.unwrap_or_default();
             Ok(StatePoint {
                 minute: minute_of_day(&timestamp),
                 effectiveness: row.get::<_, Option<f64>>(1)?.unwrap_or(0.0),
                 decline_risk: row.get::<_, Option<f64>>(2)?.unwrap_or(0.0),
-                state: if action.unwrap_or_default().starts_with("BREAK") {
+                state: if action_value.starts_with("BREAK") {
                     "break".to_string()
                 } else {
                     "work".to_string()
                 },
+                marker: if action_value.starts_with("BREAK") {
+                    Some("recommendation".to_string())
+                } else {
+                    None
+                },
+                break_benefit: row.get::<_, Option<f64>>(4)?,
             })
         })
         .map_err(|err| err.to_string())?;
     rows.collect::<Result<Vec<_>, _>>()
         .map_err(|err| err.to_string())
+}
+
+#[derive(Default)]
+struct DailySummaryDb {
+    average_effectiveness: Option<f64>,
+    break_count: i64,
+    recommendation_count: i64,
+    accepted_count: i64,
+    ignored_count: i64,
+    average_decline_risk: f64,
+    recovered_effective_minutes_estimate: i64,
+}
+
+fn daily_summary_from_db(conn: &Connection, date: &str) -> DailySummaryDb {
+    let mut summary = DailySummaryDb::default();
+    if table_exists(conn, "ml_predictions").unwrap_or(false) {
+        let row = conn
+            .query_row(
+                "SELECT AVG(effectiveness), AVG(decline_30m) FROM ml_predictions \
+                 WHERE substr(datetime(timestamp, 'localtime'), 1, 10) = ?1",
+                params![date],
+                |row| Ok((row.get::<_, Option<f64>>(0)?, row.get::<_, Option<f64>>(1)?)),
+            )
+            .ok();
+        if let Some((effectiveness, risk)) = row {
+            summary.average_decline_risk = risk.unwrap_or(0.0);
+            summary.average_effectiveness = effectiveness;
+        }
+    }
+    if table_exists(conn, "recommendations").unwrap_or(false) {
+        summary.recommendation_count = scalar_count(
+            conn,
+            &format!(
+                "SELECT COUNT(*) FROM recommendations WHERE substr(datetime(timestamp, 'localtime'), 1, 10) = '{}'",
+                date.replace('\'', "''")
+            ),
+        );
+        summary.accepted_count = scalar_count(
+            conn,
+            &format!(
+                "SELECT COUNT(*) FROM recommendations WHERE accepted = 1 AND substr(datetime(timestamp, 'localtime'), 1, 10) = '{}'",
+                date.replace('\'', "''")
+            ),
+        );
+        summary.ignored_count = scalar_count(
+            conn,
+            &format!(
+                "SELECT COUNT(*) FROM recommendations WHERE COALESCE(ignored, 0) = 1 AND substr(datetime(timestamp, 'localtime'), 1, 10) = '{}'",
+                date.replace('\'', "''")
+            ),
+        );
+        summary.break_count = scalar_count(
+            conn,
+            &format!(
+                "SELECT COUNT(*) FROM recommendations WHERE completed_at IS NOT NULL AND substr(datetime(timestamp, 'localtime'), 1, 10) = '{}'",
+                date.replace('\'', "''")
+            ),
+        );
+    }
+    if table_exists(conn, "recommendation_outcomes").unwrap_or(false) {
+        summary.recovered_effective_minutes_estimate = conn
+            .query_row(
+                "SELECT COALESCE(SUM(MAX(COALESCE(effectiveness_after, 0) - COALESCE(effectiveness_before, 0), 0) * COALESCE(actual_duration, planned_duration, 10) / 100.0), 0) \
+                 FROM recommendation_outcomes WHERE accepted = 1 AND substr(datetime(created_at, 'localtime'), 1, 10) = ?1",
+                params![date],
+                |row| row.get::<_, f64>(0),
+            )
+            .unwrap_or(0.0)
+            .round() as i64;
+    }
+    summary
+}
+
+fn best_work_block(sessions: &[RecentSession]) -> Option<String> {
+    sessions
+        .iter()
+        .max_by_key(|session| session.duration_minutes)
+        .map(|session| format!("{} | {}", session.time, session.task.clone().unwrap_or_else(|| "None".to_string())))
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]

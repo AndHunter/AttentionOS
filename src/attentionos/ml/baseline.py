@@ -71,6 +71,89 @@ class PersonalBaselineProfile:
         }
 
 
+class TaskAwareBaselineProfile:
+    """Task/time aware baseline with global fallback.
+
+    It is intentionally lightweight: this is infrastructure for future personal
+    learning, not a claim that the personal model is already validated.
+    """
+
+    def __init__(self, window_size: int = 30, min_bucket_samples: int = 5) -> None:
+        self.window_size = window_size
+        self.min_bucket_samples = min_bucket_samples
+        self.global_profile = PersonalBaselineProfile(window_size)
+        self._task_profiles: dict[str, PersonalBaselineProfile] = {}
+        self._hour_profiles: dict[int, PersonalBaselineProfile] = {}
+
+    def update(
+        self,
+        features: dict[str, float | int],
+        task_category: str | None = None,
+        local_hour: int | None = None,
+    ) -> None:
+        self.global_profile.update(features)
+        if task_category:
+            profile = self._task_profiles.setdefault(
+                task_category,
+                PersonalBaselineProfile(self.window_size),
+            )
+            profile.update(features)
+        if local_hour is not None:
+            hour = int(local_hour) % 24
+            profile = self._hour_profiles.setdefault(hour, PersonalBaselineProfile(self.window_size))
+            profile.update(features)
+
+    def relative_features(
+        self,
+        features: dict[str, float | int],
+        task_category: str | None = None,
+        local_hour: int | None = None,
+    ) -> dict[str, float]:
+        task_profile = self._usable_profile(self._task_profiles.get(task_category or ""))
+        hour_profile = self._usable_profile(
+            self._hour_profiles.get(int(local_hour) % 24) if local_hour is not None else None
+        )
+        global_relative = self.global_profile.relative_features(features)
+        output = dict(global_relative)
+        if task_profile is not None:
+            output.update(
+                {
+                    f"task_{key}": value
+                    for key, value in task_profile.relative_features(features).items()
+                }
+            )
+        else:
+            output.update({f"task_{key}": value for key, value in global_relative.items()})
+        if hour_profile is not None:
+            output.update(
+                {
+                    f"time_{key}": value
+                    for key, value in hour_profile.relative_features(features).items()
+                }
+            )
+        else:
+            output.update({f"time_{key}": value for key, value in global_relative.items()})
+        return output
+
+    def stats(self, metric: str, task_category: str | None = None, local_hour: int | None = None) -> BaselineStats:
+        task_profile = self._usable_profile(self._task_profiles.get(task_category or ""))
+        if task_profile is not None:
+            return task_profile.stats(metric)
+        if local_hour is not None:
+            hour_profile = self._usable_profile(self._hour_profiles.get(int(local_hour) % 24))
+            if hour_profile is not None:
+                return hour_profile.stats(metric)
+        return self.global_profile.stats(metric)
+
+    def _usable_profile(self, profile: PersonalBaselineProfile | None) -> PersonalBaselineProfile | None:
+        if profile is None:
+            return None
+        counts = [profile.stats(metric).count for metric in PersonalBaselineProfile.METRICS]
+        if max(counts, default=0) < self.min_bucket_samples:
+            return None
+        return profile
+
+
 def _ratio(value: float, baseline: float) -> float:
     if baseline <= 1e-9:
         return 0.0

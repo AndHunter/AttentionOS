@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 
-from attentionos.ml.baseline import PersonalBaselineProfile
+from attentionos.ml.baseline import PersonalBaselineProfile, TaskAwareBaselineProfile
 from attentionos.ml.dataset import build_effectiveness_dataset, chronological_split
 from attentionos.ml.features import compute_feature_window
 from attentionos.ml.train import train_effectiveness_baselines
@@ -26,6 +26,31 @@ def test_personal_baseline_relative_features() -> None:
     )
     assert relative["switch_rate_vs_baseline"] == 2
     assert relative["session_length_vs_baseline"] == 2
+
+
+def test_task_aware_baseline_uses_task_and_time_buckets() -> None:
+    baseline = TaskAwareBaselineProfile(min_bucket_samples=2)
+    baseline.update({"context_switch_rate": 2, "session_duration": 60, "input_event_rate": 10}, "coding", 10)
+    baseline.update({"context_switch_rate": 2, "session_duration": 60, "input_event_rate": 10}, "coding", 10)
+    baseline.update({"context_switch_rate": 8, "session_duration": 20, "input_event_rate": 4}, "gaming", 23)
+    relative = baseline.relative_features(
+        {"context_switch_rate": 4, "session_duration": 120, "input_event_rate": 20},
+        "coding",
+        10,
+    )
+    assert relative["task_switch_rate_vs_baseline"] == 2
+    assert relative["time_session_length_vs_baseline"] == 2
+
+
+def test_task_aware_baseline_falls_back_to_global_when_bucket_is_small() -> None:
+    baseline = TaskAwareBaselineProfile(min_bucket_samples=5)
+    baseline.update({"context_switch_rate": 2, "session_duration": 60, "input_event_rate": 10}, "coding", 10)
+    relative = baseline.relative_features(
+        {"context_switch_rate": 4, "session_duration": 120, "input_event_rate": 20},
+        "coding",
+        10,
+    )
+    assert relative["task_switch_rate_vs_baseline"] == relative["switch_rate_vs_baseline"]
 
 
 def test_dataset_ordering(sample_events) -> None:
