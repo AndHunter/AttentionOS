@@ -58,14 +58,17 @@ class SelfReportConfig(BaseSettings):
     fatigue_scale: tuple[int, int] = (1, 5)
     default_task_labels: list[str] = Field(
         default=[
-            "Coding",
-            "ML",
-            "Math",
-            "English",
-            "Rest",
-            "Meeting",
-            "Admin",
-            "Other",
+            "work",
+            "coding",
+            "ml",
+            "math",
+            "english",
+            "reading",
+            "writing",
+            "communication",
+            "gaming",
+            "rest",
+            "other",
         ]
     )
 

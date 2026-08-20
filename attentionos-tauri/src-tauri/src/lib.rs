@@ -112,6 +112,15 @@ struct BreakStatePayload {
     remaining_seconds: i64,
 }
 
+#[derive(Debug, Serialize)]
+struct MlDiagnosticsPayload {
+    last_inference_at: Option<String>,
+    model_version: Option<String>,
+    policy_source: Option<String>,
+    candidate_utilities: serde_json::Value,
+    diagnostics: serde_json::Value,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct UserPreferences {
     language: String,
@@ -332,6 +341,48 @@ fn get_demo_ml_prediction() -> Result<serde_json::Value, String> {
     })
 }
 
+#[tauri::command]
+fn get_ml_diagnostics() -> Result<MlDiagnosticsPayload, String> {
+    let db_path = attentionos_db_path()?;
+    let conn = Connection::open(db_path).map_err(|err| err.to_string())?;
+    if !table_exists(&conn, "ml_predictions")? {
+        return Ok(MlDiagnosticsPayload {
+            last_inference_at: None,
+            model_version: None,
+            policy_source: None,
+            candidate_utilities: serde_json::json!({}),
+            diagnostics: serde_json::json!({}),
+        });
+    }
+    let candidate_exists = column_exists(&conn, "ml_predictions", "candidate_utilities")?;
+    let diagnostics_exists = column_exists(&conn, "ml_predictions", "diagnostics_json")?;
+    let sql = format!(
+        "SELECT timestamp, model_version, policy_source, {}, {} FROM ml_predictions ORDER BY id DESC LIMIT 1",
+        if candidate_exists { "candidate_utilities" } else { "NULL" },
+        if diagnostics_exists { "diagnostics_json" } else { "NULL" }
+    );
+    conn.query_row(&sql, [], |row| {
+        let candidate_raw: Option<String> = row.get(3)?;
+        let diagnostics_raw: Option<String> = row.get(4)?;
+        Ok(MlDiagnosticsPayload {
+            last_inference_at: row.get(0)?,
+            model_version: row.get(1)?,
+            policy_source: row.get(2)?,
+            candidate_utilities: parse_json_object(candidate_raw),
+            diagnostics: parse_json_object(diagnostics_raw),
+        })
+    })
+    .or_else(|_| {
+        Ok(MlDiagnosticsPayload {
+            last_inference_at: None,
+            model_version: None,
+            policy_source: None,
+            candidate_utilities: serde_json::json!({}),
+            diagnostics: serde_json::json!({}),
+        })
+    })
+}
+
 fn run_demo_ml_once() -> Result<serde_json::Value, String> {
     let mut command = python_collector_command()?;
     command
@@ -353,6 +404,24 @@ fn run_demo_ml_once() -> Result<serde_json::Value, String> {
         ));
     }
     serde_json::from_slice(&output.stdout).map_err(|err| err.to_string())
+}
+
+fn column_exists(conn: &Connection, table: &str, column: &str) -> Result<bool, String> {
+    let mut stmt = conn
+        .prepare(&format!("PRAGMA table_info({table})"))
+        .map_err(|err| err.to_string())?;
+    let columns = stmt
+        .query_map([], |row| row.get::<_, String>(1))
+        .map_err(|err| err.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|err| err.to_string())?;
+    Ok(columns.iter().any(|item| item == column))
+}
+
+fn parse_json_object(value: Option<String>) -> serde_json::Value {
+    value
+        .and_then(|raw| serde_json::from_str(&raw).ok())
+        .unwrap_or_else(|| serde_json::json!({}))
 }
 
 fn spawn_demo_ml_scheduler() {
@@ -507,6 +576,29 @@ fn start_break(minutes: Option<i64>) -> Result<BreakStatePayload, String> {
 }
 
 #[tauri::command]
+fn ignore_break() -> Result<BreakStatePayload, String> {
+    let db_path = attentionos_db_path()?;
+    let conn = Connection::open(db_path).map_err(|err| err.to_string())?;
+    ensure_runtime_state(&conn)?;
+    let settings = load_runtime_settings();
+    let now = chrono::Utc::now().naive_utc();
+    let until = now + chrono::Duration::minutes(settings.notifications.minimum_interval_minutes);
+    conn.execute(
+        "UPDATE recommendations SET ignored = 1, ignored_at = ?1 \
+         WHERE id = (SELECT id FROM recommendations WHERE recommended_action LIKE 'BREAK_%' ORDER BY id DESC LIMIT 1)",
+        params![now.to_string()],
+    )
+    .map_err(|err| err.to_string())?;
+    conn.execute(
+        "INSERT INTO app_runtime_state (key, value) VALUES (?1, ?2) \
+         ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+        params!["break_ignore_until", until.to_string()],
+    )
+    .map_err(|err| err.to_string())?;
+    get_break_state()
+}
+
+#[tauri::command]
 fn finish_break() -> Result<BreakStatePayload, String> {
     let db_path = attentionos_db_path()?;
     let conn = Connection::open(db_path).map_err(|err| err.to_string())?;
@@ -641,10 +733,42 @@ fn ensure_runtime_state(conn: &Connection) -> Result<(), String> {
     conn.execute(
         "CREATE TABLE IF NOT EXISTS recommendations (\
          id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp TEXT NOT NULL, recommended_action TEXT, \
-         recommended_duration INTEGER, accepted INTEGER DEFAULT 0, started_at TEXT, completed_at TEXT, actual_duration REAL)",
+         recommended_duration INTEGER, accepted INTEGER DEFAULT 0, ignored INTEGER DEFAULT 0, \
+         started_at TEXT, completed_at TEXT, ignored_at TEXT, actual_duration REAL, \
+         prediction_before_id INTEGER, prediction_after_id INTEGER, task_before TEXT, task_after TEXT)",
         [],
     )
     .map_err(|err| err.to_string())?;
+    ensure_column(conn, "recommendations", "ignored", "INTEGER DEFAULT 0")?;
+    ensure_column(conn, "recommendations", "ignored_at", "TEXT")?;
+    ensure_column(conn, "recommendations", "prediction_before_id", "INTEGER")?;
+    ensure_column(conn, "recommendations", "prediction_after_id", "INTEGER")?;
+    ensure_column(conn, "recommendations", "task_before", "TEXT")?;
+    ensure_column(conn, "recommendations", "task_after", "TEXT")?;
+    Ok(())
+}
+
+fn ensure_column(
+    conn: &Connection,
+    table: &str,
+    column: &str,
+    definition: &str,
+) -> Result<(), String> {
+    let mut stmt = conn
+        .prepare(&format!("PRAGMA table_info({table})"))
+        .map_err(|err| err.to_string())?;
+    let columns = stmt
+        .query_map([], |row| row.get::<_, String>(1))
+        .map_err(|err| err.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|err| err.to_string())?;
+    if !columns.iter().any(|item| item == column) {
+        conn.execute(
+            &format!("ALTER TABLE {table} ADD COLUMN {column} {definition}"),
+            [],
+        )
+        .map_err(|err| err.to_string())?;
+    }
     Ok(())
 }
 
@@ -1441,8 +1565,10 @@ pub fn run() {
             save_self_report,
             evaluate_recommendations,
             get_demo_ml_prediction,
+            get_ml_diagnostics,
             create_test_notification,
             start_break,
+            ignore_break,
             finish_break,
             get_break_state,
             get_settings,

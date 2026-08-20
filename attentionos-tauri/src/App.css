@@ -386,6 +386,11 @@
   margin-top: 12px;
 }
 
+.utility-list {
+  display: grid;
+  gap: 6px;
+}
+
 .signal-list {
   display: flex;
   flex-wrap: wrap;

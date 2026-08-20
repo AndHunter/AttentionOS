@@ -4,7 +4,7 @@ import pandas as pd
 
 from datetime import datetime, timedelta, timezone
 
-from attentionos.ml.demo.inference import _active_break_lock
+from attentionos.ml.demo.inference import _active_break_lock, _ensure_ml_tables, _persist_prediction
 from attentionos.ml.demo.features import build_features_at, build_training_windows, feature_schema
 from attentionos.ml.demo.recommendation_engine import recommend_action
 from attentionos.ml.synthetic.generate import generate_dataset
@@ -84,6 +84,23 @@ def test_soft_decline_can_trigger_break() -> None:
     assert result.break_benefit >= 5.5
 
 
+def test_high_break_utility_can_trigger_break_before_high_decline() -> None:
+    result = recommend_action(
+        2.6,
+        0.18,
+        0.24,
+        0.38,
+        0.95,
+        50,
+        50,
+        190,
+        switch_rate_delta_5_30=0.6,
+    )
+    assert result.state == "BREAK_RECOMMENDED"
+    assert result.action.startswith("BREAK")
+    assert result.reason.startswith("action_utility")
+
+
 def test_break_recommendation_is_locked_for_duration(tmp_path) -> None:
     import sqlite3
 
@@ -107,3 +124,60 @@ def test_break_recommendation_is_locked_for_duration(tmp_path) -> None:
     assert lock["action"] == "BREAK_15"
     assert lock["minutes"] == 15
     assert _active_break_lock(db, now + timedelta(minutes=11)) is None
+
+
+def test_ignored_break_recommendation_does_not_lock(tmp_path) -> None:
+    import sqlite3
+
+    db = tmp_path / "attentionos.db"
+    conn = sqlite3.connect(db)
+    _ensure_ml_tables(conn)
+    now = datetime(2026, 1, 1, 12, 10, tzinfo=timezone.utc)
+    conn.execute(
+        "INSERT INTO recommendations (timestamp, recommended_action, recommended_duration, ignored, ignored_at) "
+        "VALUES (?1, 'BREAK_15', 15, 1, ?1)",
+        ((now - timedelta(minutes=5)).replace(tzinfo=None).isoformat(sep=" "),),
+    )
+    conn.commit()
+    conn.close()
+
+    assert _active_break_lock(db, now) is None
+
+
+def test_persist_prediction_stores_utilities_and_diagnostics(tmp_path) -> None:
+    import sqlite3
+
+    db = tmp_path / "attentionos.db"
+    now = datetime(2026, 1, 1, 12, 10, tzinfo=timezone.utc)
+    result = {
+        "model_version": "demo-test",
+        "state": "WORK",
+        "current_effectiveness": 76.0,
+        "decline_15m": 0.1,
+        "decline_30m": 0.2,
+        "decline_60m": 0.3,
+        "break_benefit": 2.0,
+        "recommended_action": "CONTINUE",
+        "recommended_break_minutes": None,
+        "next_break_eta_minutes": 5,
+        "policy_source": "MODEL",
+        "diagnostics": {"feature_rows_available": 42},
+        "recommendation": {
+            "continue_utility": 70.0,
+            "best_break_utility": 62.0,
+            "confidence": 0.8,
+            "utilities": {"CONTINUE": 70.0, "BREAK_10": 62.0},
+        },
+    }
+
+    db.touch()
+    _persist_prediction(db, result, now)
+
+    conn = sqlite3.connect(db)
+    row = conn.execute(
+        "SELECT candidate_utilities, diagnostics_json FROM ml_predictions ORDER BY id DESC LIMIT 1"
+    ).fetchone()
+    conn.close()
+    assert row is not None
+    assert "BREAK_10" in row[0]
+    assert "feature_rows_available" in row[1]

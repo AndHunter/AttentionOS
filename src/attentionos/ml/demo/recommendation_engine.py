@@ -109,6 +109,25 @@ def recommend_action(
             "MODEL",
         )
 
+    if (
+        continuous_work_minutes >= 45
+        and model_break_benefit >= 7.0
+        and best_break_utility - continue_utility >= 18
+    ):
+        minutes = int(best_break_action.split("_")[1])
+        return _break_result(
+            best_break_action,
+            minutes,
+            "Break recommended",
+            "action_utility: modeled break utility is substantially higher than continuing.",
+            max(decline_30m, raw_break_benefit, 0.68),
+            model_break_benefit,
+            continue_utility,
+            best_break_utility,
+            utilities,
+            "MODEL",
+        )
+
     if model_best_action.startswith("BREAK") and model_break_benefit >= 4.8 and decline_30m >= 0.45:
         minutes = int(model_best_action.split("_")[1])
         return _break_result(

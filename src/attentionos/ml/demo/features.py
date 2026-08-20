@@ -414,10 +414,18 @@ def _task_category(task: str) -> str:
     task = task.lower()
     if task in {"work", "работа"}:
         return "work"
+    if task in {"coding", "code", "программирование"}:
+        return "coding"
     if task in {"rest", "отдых"}:
         return "rest"
     if task in {"gaming", "game", "игра"}:
         return "gaming"
+    if task in {"reading", "чтение"}:
+        return "reading"
+    if task in {"writing", "письмо"}:
+        return "writing"
+    if task in {"communication", "общение"}:
+        return "communication"
     if task in {"other", "другое", "none"}:
         return "other"
     if "ml" in task:

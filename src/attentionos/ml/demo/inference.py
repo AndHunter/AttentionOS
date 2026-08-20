@@ -208,7 +208,13 @@ def _persist_prediction(db_path: Path, result: dict[str, object], now_local: dat
         rec = result["recommendation"]
         assert isinstance(rec, dict)
         previous_action = _previous_prediction_action(conn)
-        should_notify_break = result.get("state") == "BREAK_RECOMMENDED" and not previous_action.startswith("BREAK")
+        cooldown_minutes = get_config().intervention.cooldown_minutes
+        should_notify_break = (
+            result.get("state") == "BREAK_RECOMMENDED"
+            and not previous_action.startswith("BREAK")
+            and not _break_notification_in_cooldown(conn, now_utc, cooldown_minutes)
+            and not _break_recommendation_ignored(conn, now_utc)
+        )
         should_notify_work = (
             result.get("state") == "WORK"
             and previous_action.startswith("BREAK")
@@ -218,8 +224,8 @@ def _persist_prediction(db_path: Path, result: dict[str, object], now_local: dat
             "INSERT INTO ml_predictions ("
             "timestamp, model_version, effectiveness, decline_15m, decline_30m, decline_60m, "
             "continue_utility, best_break_utility, break_benefit, recommended_action, "
-            "recommended_break_minutes, next_break_eta, confidence, policy_source"
-            ") VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+            "recommended_break_minutes, next_break_eta, confidence, policy_source, candidate_utilities, diagnostics_json"
+            ") VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
             (
                 now_utc,
                 result.get("model_version"),
@@ -235,6 +241,8 @@ def _persist_prediction(db_path: Path, result: dict[str, object], now_local: dat
                 result.get("next_break_eta_minutes"),
                 rec.get("confidence"),
                 result.get("policy_source"),
+                json.dumps(rec.get("utilities") or {}, ensure_ascii=False),
+                json.dumps(result.get("diagnostics") or {}, ensure_ascii=False, default=str),
             ),
         )
         if should_notify_break:
@@ -266,22 +274,41 @@ def _persist_prediction(db_path: Path, result: dict[str, object], now_local: dat
 
 def _ensure_ml_tables(conn: sqlite3.Connection) -> None:
     conn.execute(
+        "CREATE TABLE IF NOT EXISTS app_runtime_state (key TEXT PRIMARY KEY, value TEXT NOT NULL)"
+    )
+    conn.execute(
         "CREATE TABLE IF NOT EXISTS ml_predictions ("
         "id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp TEXT NOT NULL, model_version TEXT, effectiveness REAL, "
         "decline_15m REAL, decline_30m REAL, decline_60m REAL, continue_utility REAL, best_break_utility REAL, "
         "break_benefit REAL, recommended_action TEXT, recommended_break_minutes INTEGER, next_break_eta INTEGER, "
-        "confidence REAL, policy_source TEXT)"
+        "confidence REAL, policy_source TEXT, candidate_utilities TEXT, diagnostics_json TEXT)"
     )
     conn.execute(
         "CREATE TABLE IF NOT EXISTS recommendations ("
         "id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp TEXT NOT NULL, recommended_action TEXT, "
-        "recommended_duration INTEGER, accepted INTEGER DEFAULT 0, started_at TEXT, completed_at TEXT, actual_duration REAL)"
+        "recommended_duration INTEGER, accepted INTEGER DEFAULT 0, ignored INTEGER DEFAULT 0, "
+        "started_at TEXT, completed_at TEXT, ignored_at TEXT, actual_duration REAL, "
+        "prediction_before_id INTEGER, prediction_after_id INTEGER, task_before TEXT, task_after TEXT)"
     )
     conn.execute(
         "CREATE TABLE IF NOT EXISTS notifications ("
         "id INTEGER PRIMARY KEY AUTOINCREMENT, created_at TEXT NOT NULL, title TEXT NOT NULL, body TEXT NOT NULL, "
         "state TEXT NOT NULL, intervention_id INTEGER, kind TEXT NOT NULL, action_payload TEXT)"
     )
+    _ensure_column(conn, "ml_predictions", "candidate_utilities", "TEXT")
+    _ensure_column(conn, "ml_predictions", "diagnostics_json", "TEXT")
+    _ensure_column(conn, "recommendations", "ignored", "INTEGER DEFAULT 0")
+    _ensure_column(conn, "recommendations", "ignored_at", "TEXT")
+    _ensure_column(conn, "recommendations", "prediction_before_id", "INTEGER")
+    _ensure_column(conn, "recommendations", "prediction_after_id", "INTEGER")
+    _ensure_column(conn, "recommendations", "task_before", "TEXT")
+    _ensure_column(conn, "recommendations", "task_after", "TEXT")
+
+
+def _ensure_column(conn: sqlite3.Connection, table: str, column: str, definition: str) -> None:
+    columns = {str(row[1]) for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+    if column not in columns:
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
 
 
 def _previous_prediction_action(conn: sqlite3.Connection) -> str:
@@ -291,6 +318,33 @@ def _previous_prediction_action(conn: sqlite3.Connection) -> str:
     if row is None:
         return ""
     return str(row[0] or "")
+
+
+def _break_notification_in_cooldown(
+    conn: sqlite3.Connection,
+    now_utc: str,
+    cooldown_minutes: int,
+) -> bool:
+    since = datetime.fromisoformat(now_utc).replace(tzinfo=timezone.utc) - timedelta(minutes=cooldown_minutes)
+    row = conn.execute(
+        "SELECT 1 FROM notifications "
+        "WHERE kind = 'ml_break_recommendation' AND created_at >= ?1 "
+        "ORDER BY id DESC LIMIT 1",
+        (since.replace(tzinfo=None).isoformat(sep=" "),),
+    ).fetchone()
+    return row is not None
+
+
+def _break_recommendation_ignored(conn: sqlite3.Connection, now_utc: str) -> bool:
+    row = conn.execute("SELECT value FROM app_runtime_state WHERE key = 'break_ignore_until'").fetchone()
+    if row is None:
+        return False
+    try:
+        until = datetime.fromisoformat(str(row[0])).replace(tzinfo=timezone.utc)
+        now = datetime.fromisoformat(now_utc).replace(tzinfo=timezone.utc)
+    except ValueError:
+        return False
+    return now < until
 
 
 def _active_break_lock(
@@ -306,12 +360,12 @@ def _active_break_lock(
         if tracking_started_at is None:
             row = conn.execute(
                 "SELECT timestamp, recommended_action, recommended_duration FROM recommendations "
-                "WHERE recommended_action LIKE 'BREAK_%' ORDER BY id DESC LIMIT 1"
+                "WHERE recommended_action LIKE 'BREAK_%' AND COALESCE(ignored, 0) = 0 ORDER BY id DESC LIMIT 1"
             ).fetchone()
         else:
             row = conn.execute(
                 "SELECT timestamp, recommended_action, recommended_duration FROM recommendations "
-                "WHERE recommended_action LIKE 'BREAK_%' AND timestamp >= ?1 ORDER BY id DESC LIMIT 1",
+                "WHERE recommended_action LIKE 'BREAK_%' AND COALESCE(ignored, 0) = 0 AND timestamp >= ?1 ORDER BY id DESC LIMIT 1",
                 (tracking_started_at.replace(tzinfo=None).isoformat(sep=" "),),
             ).fetchone()
     finally:
