@@ -181,3 +181,24 @@ def test_persist_prediction_stores_utilities_and_diagnostics(tmp_path) -> None:
     assert row is not None
     assert "BREAK_10" in row[0]
     assert "feature_rows_available" in row[1]
+
+
+def test_ml_tables_include_recommendation_outcomes(tmp_path) -> None:
+    import sqlite3
+
+    db = tmp_path / "attentionos.db"
+    conn = sqlite3.connect(db)
+    _ensure_ml_tables(conn)
+    tables = {
+        row[0]
+        for row in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table'"
+        ).fetchall()
+    }
+    columns = {
+        row[1]
+        for row in conn.execute("PRAGMA table_info(recommendation_outcomes)").fetchall()
+    }
+    conn.close()
+    assert "recommendation_outcomes" in tables
+    assert {"recommendation_id", "effectiveness_before", "effectiveness_after"} <= columns

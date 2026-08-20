@@ -291,6 +291,14 @@ def _ensure_ml_tables(conn: sqlite3.Connection) -> None:
         "prediction_before_id INTEGER, prediction_after_id INTEGER, task_before TEXT, task_after TEXT)"
     )
     conn.execute(
+        "CREATE TABLE IF NOT EXISTS recommendation_outcomes ("
+        "id INTEGER PRIMARY KEY AUTOINCREMENT, recommendation_id INTEGER, created_at TEXT NOT NULL, "
+        "action TEXT, accepted INTEGER DEFAULT 0, ignored INTEGER DEFAULT 0, planned_duration INTEGER, "
+        "actual_duration REAL, prediction_before_id INTEGER, prediction_after_id INTEGER, "
+        "effectiveness_before REAL, effectiveness_after REAL, decline_30m_before REAL, decline_30m_after REAL, "
+        "task_before TEXT, task_after TEXT)"
+    )
+    conn.execute(
         "CREATE TABLE IF NOT EXISTS notifications ("
         "id INTEGER PRIMARY KEY AUTOINCREMENT, created_at TEXT NOT NULL, title TEXT NOT NULL, body TEXT NOT NULL, "
         "state TEXT NOT NULL, intervention_id INTEGER, kind TEXT NOT NULL, action_payload TEXT)"

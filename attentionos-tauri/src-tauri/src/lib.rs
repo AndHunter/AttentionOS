@@ -119,6 +119,12 @@ struct MlDiagnosticsPayload {
     policy_source: Option<String>,
     candidate_utilities: serde_json::Value,
     diagnostics: serde_json::Value,
+    real_telemetry_hours: f64,
+    self_reports: i64,
+    recommendations: i64,
+    completed_breaks: i64,
+    ignored_recommendations: i64,
+    usable_outcomes: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -345,14 +351,9 @@ fn get_demo_ml_prediction() -> Result<serde_json::Value, String> {
 fn get_ml_diagnostics() -> Result<MlDiagnosticsPayload, String> {
     let db_path = attentionos_db_path()?;
     let conn = Connection::open(db_path).map_err(|err| err.to_string())?;
+    ensure_runtime_state(&conn)?;
     if !table_exists(&conn, "ml_predictions")? {
-        return Ok(MlDiagnosticsPayload {
-            last_inference_at: None,
-            model_version: None,
-            policy_source: None,
-            candidate_utilities: serde_json::json!({}),
-            diagnostics: serde_json::json!({}),
-        });
+        return Ok(ml_diagnostics_empty(&conn));
     }
     let candidate_exists = column_exists(&conn, "ml_predictions", "candidate_utilities")?;
     let diagnostics_exists = column_exists(&conn, "ml_predictions", "diagnostics_json")?;
@@ -364,23 +365,67 @@ fn get_ml_diagnostics() -> Result<MlDiagnosticsPayload, String> {
     conn.query_row(&sql, [], |row| {
         let candidate_raw: Option<String> = row.get(3)?;
         let diagnostics_raw: Option<String> = row.get(4)?;
+        let progress = ml_progress(&conn);
         Ok(MlDiagnosticsPayload {
             last_inference_at: row.get(0)?,
             model_version: row.get(1)?,
             policy_source: row.get(2)?,
             candidate_utilities: parse_json_object(candidate_raw),
             diagnostics: parse_json_object(diagnostics_raw),
+            real_telemetry_hours: progress.real_telemetry_hours,
+            self_reports: progress.self_reports,
+            recommendations: progress.recommendations,
+            completed_breaks: progress.completed_breaks,
+            ignored_recommendations: progress.ignored_recommendations,
+            usable_outcomes: progress.usable_outcomes,
         })
     })
     .or_else(|_| {
-        Ok(MlDiagnosticsPayload {
-            last_inference_at: None,
-            model_version: None,
-            policy_source: None,
-            candidate_utilities: serde_json::json!({}),
-            diagnostics: serde_json::json!({}),
-        })
+        Ok(ml_diagnostics_empty(&conn))
     })
+}
+
+struct MlProgress {
+    real_telemetry_hours: f64,
+    self_reports: i64,
+    recommendations: i64,
+    completed_breaks: i64,
+    ignored_recommendations: i64,
+    usable_outcomes: i64,
+}
+
+fn ml_diagnostics_empty(conn: &Connection) -> MlDiagnosticsPayload {
+    let progress = ml_progress(conn);
+    MlDiagnosticsPayload {
+        last_inference_at: None,
+        model_version: None,
+        policy_source: None,
+        candidate_utilities: serde_json::json!({}),
+        diagnostics: serde_json::json!({}),
+        real_telemetry_hours: progress.real_telemetry_hours,
+        self_reports: progress.self_reports,
+        recommendations: progress.recommendations,
+        completed_breaks: progress.completed_breaks,
+        ignored_recommendations: progress.ignored_recommendations,
+        usable_outcomes: progress.usable_outcomes,
+    }
+}
+
+fn ml_progress(conn: &Connection) -> MlProgress {
+    MlProgress {
+        real_telemetry_hours: telemetry_hours(conn),
+        self_reports: table_count(conn, "self_reports"),
+        recommendations: table_count(conn, "recommendations"),
+        completed_breaks: scalar_count(
+            conn,
+            "SELECT COUNT(*) FROM recommendations WHERE completed_at IS NOT NULL",
+        ),
+        ignored_recommendations: scalar_count(
+            conn,
+            "SELECT COUNT(*) FROM recommendations WHERE COALESCE(ignored, 0) = 1",
+        ),
+        usable_outcomes: table_count(conn, "recommendation_outcomes"),
+    }
 }
 
 fn run_demo_ml_once() -> Result<serde_json::Value, String> {
@@ -422,6 +467,30 @@ fn parse_json_object(value: Option<String>) -> serde_json::Value {
     value
         .and_then(|raw| serde_json::from_str(&raw).ok())
         .unwrap_or_else(|| serde_json::json!({}))
+}
+
+fn table_count(conn: &Connection, table: &str) -> i64 {
+    if !table_exists(conn, table).unwrap_or(false) {
+        return 0;
+    }
+    scalar_count(conn, &format!("SELECT COUNT(*) FROM {table}"))
+}
+
+fn scalar_count(conn: &Connection, sql: &str) -> i64 {
+    conn.query_row(sql, [], |row| row.get::<_, i64>(0))
+        .unwrap_or(0)
+}
+
+fn telemetry_hours(conn: &Connection) -> f64 {
+    if !table_exists(conn, "activity_events").unwrap_or(false) {
+        return 0.0;
+    }
+    conn.query_row(
+        "SELECT COALESCE(SUM(MAX((julianday(ts_end) - julianday(ts_start)) * 86400.0, 0)), 0) / 3600.0 FROM activity_events",
+        [],
+        |row| row.get::<_, f64>(0),
+    )
+    .unwrap_or(0.0)
 }
 
 fn spawn_demo_ml_scheduler() {
@@ -548,6 +617,8 @@ fn start_break(minutes: Option<i64>) -> Result<BreakStatePayload, String> {
     ensure_runtime_state(&conn)?;
     let now = chrono::Utc::now().naive_utc();
     let until = now + chrono::Duration::minutes(planned);
+    let prediction_before_id = latest_prediction_id(&conn);
+    let task_before = current_task_label();
     conn.execute(
         "INSERT INTO app_runtime_state (key, value) VALUES (?1, ?2) \
          ON CONFLICT(key) DO UPDATE SET value=excluded.value",
@@ -566,12 +637,22 @@ fn start_break(minutes: Option<i64>) -> Result<BreakStatePayload, String> {
         params!["break_planned_until", until.to_string()],
     )
     .map_err(|err| err.to_string())?;
-    conn.execute(
-        "INSERT INTO recommendations (timestamp, recommended_action, recommended_duration, accepted, started_at) \
-         VALUES (?1, ?2, ?3, 1, ?1)",
-        params![now.to_string(), format!("BREAK_{planned}"), planned],
-    )
-    .map_err(|err| err.to_string())?;
+    let updated = conn
+        .execute(
+            "UPDATE recommendations SET accepted = 1, started_at = ?1, recommended_duration = ?2, \
+             prediction_before_id = COALESCE(prediction_before_id, ?3), task_before = COALESCE(task_before, ?4) \
+             WHERE id = (SELECT id FROM recommendations WHERE recommended_action LIKE 'BREAK_%' AND completed_at IS NULL AND COALESCE(ignored, 0) = 0 ORDER BY id DESC LIMIT 1)",
+            params![now.to_string(), planned, prediction_before_id, task_before],
+        )
+        .map_err(|err| err.to_string())?;
+    if updated == 0 {
+        conn.execute(
+            "INSERT INTO recommendations (timestamp, recommended_action, recommended_duration, accepted, started_at, prediction_before_id, task_before) \
+             VALUES (?1, ?2, ?3, 1, ?1, ?4, ?5)",
+            params![now.to_string(), format!("BREAK_{planned}"), planned, prediction_before_id, task_before],
+        )
+        .map_err(|err| err.to_string())?;
+    }
     get_break_state()
 }
 
@@ -583,12 +664,18 @@ fn ignore_break() -> Result<BreakStatePayload, String> {
     let settings = load_runtime_settings();
     let now = chrono::Utc::now().naive_utc();
     let until = now + chrono::Duration::minutes(settings.notifications.minimum_interval_minutes);
+    let recommendation_id = latest_break_recommendation_id(&conn);
+    let prediction_before_id = latest_prediction_id(&conn);
+    let task_before = current_task_label();
     conn.execute(
-        "UPDATE recommendations SET ignored = 1, ignored_at = ?1 \
+        "UPDATE recommendations SET ignored = 1, ignored_at = ?1, prediction_before_id = COALESCE(prediction_before_id, ?2), task_before = COALESCE(task_before, ?3) \
          WHERE id = (SELECT id FROM recommendations WHERE recommended_action LIKE 'BREAK_%' ORDER BY id DESC LIMIT 1)",
-        params![now.to_string()],
+        params![now.to_string(), prediction_before_id, task_before],
     )
     .map_err(|err| err.to_string())?;
+    if let Some(id) = recommendation_id {
+        persist_recommendation_outcome(&conn, id, false, true)?;
+    }
     conn.execute(
         "INSERT INTO app_runtime_state (key, value) VALUES (?1, ?2) \
          ON CONFLICT(key) DO UPDATE SET value=excluded.value",
@@ -609,12 +696,18 @@ fn finish_break() -> Result<BreakStatePayload, String> {
     let actual = started
         .map(|start| now.signed_duration_since(start).num_minutes().max(0))
         .unwrap_or(0);
+    let recommendation_id = latest_started_recommendation_id(&conn);
+    let prediction_after_id = latest_prediction_id(&conn);
+    let task_after = current_task_label();
     conn.execute(
-        "UPDATE recommendations SET completed_at = ?1, actual_duration = ?2 \
+        "UPDATE recommendations SET completed_at = ?1, actual_duration = ?2, prediction_after_id = ?3, task_after = ?4 \
          WHERE id = (SELECT id FROM recommendations WHERE started_at IS NOT NULL ORDER BY id DESC LIMIT 1)",
-        params![now.to_string(), actual],
+        params![now.to_string(), actual, prediction_after_id, task_after],
     )
     .map_err(|err| err.to_string())?;
+    if let Some(id) = recommendation_id {
+        persist_recommendation_outcome(&conn, id, true, false)?;
+    }
     conn.execute(
         "INSERT INTO app_runtime_state (key, value) VALUES (?1, ?2) \
          ON CONFLICT(key) DO UPDATE SET value=excluded.value",
@@ -739,6 +832,16 @@ fn ensure_runtime_state(conn: &Connection) -> Result<(), String> {
         [],
     )
     .map_err(|err| err.to_string())?;
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS recommendation_outcomes (\
+         id INTEGER PRIMARY KEY AUTOINCREMENT, recommendation_id INTEGER, created_at TEXT NOT NULL, \
+         action TEXT, accepted INTEGER DEFAULT 0, ignored INTEGER DEFAULT 0, planned_duration INTEGER, \
+         actual_duration REAL, prediction_before_id INTEGER, prediction_after_id INTEGER, \
+         effectiveness_before REAL, effectiveness_after REAL, decline_30m_before REAL, decline_30m_after REAL, \
+         task_before TEXT, task_after TEXT)",
+        [],
+    )
+    .map_err(|err| err.to_string())?;
     ensure_column(conn, "recommendations", "ignored", "INTEGER DEFAULT 0")?;
     ensure_column(conn, "recommendations", "ignored_at", "TEXT")?;
     ensure_column(conn, "recommendations", "prediction_before_id", "INTEGER")?;
@@ -799,6 +902,110 @@ fn latest_recommended_break_minutes() -> i64 {
         |row| row.get::<_, i64>(0),
     )
     .unwrap_or(10)
+}
+
+fn latest_prediction_id(conn: &Connection) -> Option<i64> {
+    if !table_exists(conn, "ml_predictions").unwrap_or(false) {
+        return None;
+    }
+    conn.query_row("SELECT id FROM ml_predictions ORDER BY id DESC LIMIT 1", [], |row| {
+        row.get(0)
+    })
+    .ok()
+}
+
+fn latest_break_recommendation_id(conn: &Connection) -> Option<i64> {
+    conn.query_row(
+        "SELECT id FROM recommendations WHERE recommended_action LIKE 'BREAK_%' ORDER BY id DESC LIMIT 1",
+        [],
+        |row| row.get(0),
+    )
+    .ok()
+}
+
+fn latest_started_recommendation_id(conn: &Connection) -> Option<i64> {
+    conn.query_row(
+        "SELECT id FROM recommendations WHERE started_at IS NOT NULL ORDER BY id DESC LIMIT 1",
+        [],
+        |row| row.get(0),
+    )
+    .ok()
+}
+
+fn current_task_label() -> Option<String> {
+    let task = load_runtime_settings().preferences.current_task_label;
+    if task == "None" {
+        None
+    } else {
+        Some(task)
+    }
+}
+
+fn persist_recommendation_outcome(
+    conn: &Connection,
+    recommendation_id: i64,
+    accepted: bool,
+    ignored: bool,
+) -> Result<(), String> {
+    let now = chrono::Utc::now().naive_utc().to_string();
+    let mut stmt = conn
+        .prepare(
+            "SELECT recommended_action, recommended_duration, actual_duration, prediction_before_id, prediction_after_id, task_before, task_after \
+             FROM recommendations WHERE id = ?1",
+        )
+        .map_err(|err| err.to_string())?;
+    let row = stmt
+        .query_row(params![recommendation_id], |row| {
+            Ok((
+                row.get::<_, Option<String>>(0)?,
+                row.get::<_, Option<i64>>(1)?,
+                row.get::<_, Option<f64>>(2)?,
+                row.get::<_, Option<i64>>(3)?,
+                row.get::<_, Option<i64>>(4)?,
+                row.get::<_, Option<String>>(5)?,
+                row.get::<_, Option<String>>(6)?,
+            ))
+        })
+        .map_err(|err| err.to_string())?;
+    let before = prediction_snapshot(conn, row.3);
+    let after = prediction_snapshot(conn, row.4.or_else(|| latest_prediction_id(conn)));
+    conn.execute(
+        "INSERT INTO recommendation_outcomes (recommendation_id, created_at, action, accepted, ignored, planned_duration, actual_duration, \
+         prediction_before_id, prediction_after_id, effectiveness_before, effectiveness_after, decline_30m_before, decline_30m_after, task_before, task_after) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+        params![
+            recommendation_id,
+            now,
+            row.0,
+            if accepted { 1 } else { 0 },
+            if ignored { 1 } else { 0 },
+            row.1,
+            row.2,
+            row.3,
+            row.4.or_else(|| latest_prediction_id(conn)),
+            before.map(|item| item.0),
+            after.map(|item| item.0),
+            before.map(|item| item.1),
+            after.map(|item| item.1),
+            row.5,
+            row.6.or_else(current_task_label),
+        ],
+    )
+    .map_err(|err| err.to_string())?;
+    Ok(())
+}
+
+fn prediction_snapshot(conn: &Connection, id: Option<i64>) -> Option<(f64, f64)> {
+    let id = id?;
+    if !table_exists(conn, "ml_predictions").unwrap_or(false) {
+        return None;
+    }
+    conn.query_row(
+        "SELECT effectiveness, decline_30m FROM ml_predictions WHERE id = ?1",
+        params![id],
+        |row| Ok((row.get::<_, Option<f64>>(0)?.unwrap_or(0.0), row.get::<_, Option<f64>>(1)?.unwrap_or(0.0))),
+    )
+    .ok()
 }
 
 fn parse_sqlite_time_utc(value: &str) -> Result<chrono::NaiveDateTime, chrono::ParseError> {
