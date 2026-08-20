@@ -300,6 +300,16 @@
   opacity: 1;
 }
 
+.timeline-segment.idle {
+  background: repeating-linear-gradient(
+    135deg,
+    color-mix(in srgb, var(--muted) 22%, transparent),
+    color-mix(in srgb, var(--muted) 22%, transparent) 6px,
+    color-mix(in srgb, var(--muted) 10%, transparent) 6px,
+    color-mix(in srgb, var(--muted) 10%, transparent) 12px
+  );
+}
+
 .timeline-detail {
   display: flex;
   flex-wrap: wrap;
@@ -362,6 +372,20 @@
   font-size: 18px;
 }
 
+.metric-pill.compact {
+  display: inline-grid;
+  min-height: 0;
+  min-width: 104px;
+  padding: 8px 10px;
+}
+
+.break-actions {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  margin-top: 12px;
+}
+
 .signal-list {
   display: flex;
   flex-wrap: wrap;
@@ -382,6 +406,49 @@
 .app-list {
   display: grid;
   gap: 14px;
+}
+
+.state-history {
+  position: relative;
+  height: 164px;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--surface-secondary);
+}
+
+.state-history::before {
+  content: "";
+  position: absolute;
+  inset: 16px 0 32px;
+  background: linear-gradient(to top, transparent 49%, color-mix(in srgb, var(--border) 70%, transparent) 50%, transparent 51%);
+}
+
+.state-history span {
+  position: absolute;
+  width: 7px;
+  height: 7px;
+  margin-left: -3px;
+  border-radius: 999px;
+  background: var(--accent);
+}
+
+.state-history span.break {
+  top: 0;
+  bottom: 0;
+  width: 6px;
+  height: auto;
+  border-radius: 0;
+  background: color-mix(in srgb, var(--warning) 34%, transparent);
+}
+
+.state-history i {
+  position: absolute;
+  left: 2px;
+  bottom: -1px;
+  width: 2px;
+  background: var(--danger);
+  opacity: 0.75;
 }
 
 .bar-row > div:first-child {

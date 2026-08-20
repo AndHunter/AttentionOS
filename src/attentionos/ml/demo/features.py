@@ -202,7 +202,7 @@ def real_events_to_frame(events: list[dict[str, object]]) -> pd.DataFrame:
                 "idle": 1 if float(event.get("idle_seconds") or 0) >= 120 else 0,
                 "keyboard_events": int(event.get("keyboard_events") or 0),
                 "mouse_events": int(event.get("mouse_events") or 0),
-                "is_distraction": 1 if any(x in process for x in ["telegram", "discord", "steam"]) else 0,
+                "is_distraction": 1 if _task_category(task) in {"gaming", "rest"} else 0,
             }
         )
     return pd.DataFrame(rows)
@@ -412,6 +412,14 @@ def _ratio(value: object, baseline: float) -> float:
 
 def _task_category(task: str) -> str:
     task = task.lower()
+    if task in {"work", "работа"}:
+        return "work"
+    if task in {"rest", "отдых"}:
+        return "rest"
+    if task in {"gaming", "game", "игра"}:
+        return "gaming"
+    if task in {"other", "другое", "none"}:
+        return "other"
     if "ml" in task:
         return "ml"
     if "math" in task:

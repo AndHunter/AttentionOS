@@ -37,6 +37,7 @@ struct Metric {
 struct TimelineSegment {
     app: String,
     task: Option<String>,
+    kind: String,
     start_minute: i64,
     end_minute: i64,
     duration_minutes: i64,
@@ -58,6 +59,14 @@ struct RecentSession {
 }
 
 #[derive(Debug, Serialize)]
+struct StatePoint {
+    minute: i64,
+    effectiveness: f64,
+    decline_risk: f64,
+    state: String,
+}
+
+#[derive(Debug, Serialize)]
 struct DashboardPayload {
     date: String,
     db_path: String,
@@ -71,6 +80,7 @@ struct DashboardPayload {
     timeline: Vec<TimelineSegment>,
     top_apps: Vec<AppUsage>,
     recent_sessions: Vec<RecentSession>,
+    state_history: Vec<StatePoint>,
 }
 
 #[derive(Debug, Serialize)]
@@ -90,6 +100,16 @@ struct SelfReportPayload {
     difficulty: i64,
     note: String,
     task: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct BreakStatePayload {
+    state: String,
+    recommended_minutes: Option<i64>,
+    started_at: Option<String>,
+    planned_until: Option<String>,
+    elapsed_seconds: i64,
+    remaining_seconds: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -452,6 +472,98 @@ fn create_test_notification() -> Result<NotificationPayload, String> {
 }
 
 #[tauri::command]
+fn start_break(minutes: Option<i64>) -> Result<BreakStatePayload, String> {
+    let planned = minutes.unwrap_or_else(latest_recommended_break_minutes).clamp(1, 180);
+    let db_path = attentionos_db_path()?;
+    let conn = Connection::open(db_path).map_err(|err| err.to_string())?;
+    ensure_runtime_state(&conn)?;
+    let now = chrono::Utc::now().naive_utc();
+    let until = now + chrono::Duration::minutes(planned);
+    conn.execute(
+        "INSERT INTO app_runtime_state (key, value) VALUES (?1, ?2) \
+         ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+        params!["break_state", "BREAK"],
+    )
+    .map_err(|err| err.to_string())?;
+    conn.execute(
+        "INSERT INTO app_runtime_state (key, value) VALUES (?1, ?2) \
+         ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+        params!["break_started_at", now.to_string()],
+    )
+    .map_err(|err| err.to_string())?;
+    conn.execute(
+        "INSERT INTO app_runtime_state (key, value) VALUES (?1, ?2) \
+         ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+        params!["break_planned_until", until.to_string()],
+    )
+    .map_err(|err| err.to_string())?;
+    conn.execute(
+        "INSERT INTO recommendations (timestamp, recommended_action, recommended_duration, accepted, started_at) \
+         VALUES (?1, ?2, ?3, 1, ?1)",
+        params![now.to_string(), format!("BREAK_{planned}"), planned],
+    )
+    .map_err(|err| err.to_string())?;
+    get_break_state()
+}
+
+#[tauri::command]
+fn finish_break() -> Result<BreakStatePayload, String> {
+    let db_path = attentionos_db_path()?;
+    let conn = Connection::open(db_path).map_err(|err| err.to_string())?;
+    ensure_runtime_state(&conn)?;
+    let now = chrono::Utc::now().naive_utc();
+    let started = runtime_value(&conn, "break_started_at")
+        .and_then(|value| parse_sqlite_time_utc(&value).ok());
+    let actual = started
+        .map(|start| now.signed_duration_since(start).num_minutes().max(0))
+        .unwrap_or(0);
+    conn.execute(
+        "UPDATE recommendations SET completed_at = ?1, actual_duration = ?2 \
+         WHERE id = (SELECT id FROM recommendations WHERE started_at IS NOT NULL ORDER BY id DESC LIMIT 1)",
+        params![now.to_string(), actual],
+    )
+    .map_err(|err| err.to_string())?;
+    conn.execute(
+        "INSERT INTO app_runtime_state (key, value) VALUES (?1, ?2) \
+         ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+        params!["break_state", "READY_TO_WORK"],
+    )
+    .map_err(|err| err.to_string())?;
+    get_break_state()
+}
+
+#[tauri::command]
+fn get_break_state() -> Result<BreakStatePayload, String> {
+    let db_path = attentionos_db_path()?;
+    let conn = Connection::open(db_path).map_err(|err| err.to_string())?;
+    ensure_runtime_state(&conn)?;
+    let state = runtime_value(&conn, "break_state").unwrap_or_else(|| "WORK".to_string());
+    let started_at = runtime_value(&conn, "break_started_at");
+    let planned_until = runtime_value(&conn, "break_planned_until");
+    let now = chrono::Utc::now().naive_utc();
+    let started = started_at
+        .as_ref()
+        .and_then(|value| parse_sqlite_time_utc(value).ok());
+    let until = planned_until
+        .as_ref()
+        .and_then(|value| parse_sqlite_time_utc(value).ok());
+    let elapsed_seconds = started
+        .map(|start| now.signed_duration_since(start).num_seconds().max(0))
+        .unwrap_or(0);
+    let remaining_seconds = until
+        .map(|end| end.signed_duration_since(now).num_seconds().max(0))
+        .unwrap_or(0);
+    Ok(BreakStatePayload {
+        state,
+        recommended_minutes: Some(latest_recommended_break_minutes()),
+        started_at,
+        planned_until,
+        elapsed_seconds,
+        remaining_seconds,
+    })
+}
+
+#[tauri::command]
 fn get_settings() -> Result<RuntimeSettingsPayload, String> {
     let path = attentionos_settings_path()?;
     if !path.exists() {
@@ -510,11 +622,7 @@ fn start_tracking(state: tauri::State<'_, CollectorProcess>) -> Result<(), Strin
 fn record_tracking_started() -> Result<(), String> {
     let db_path = attentionos_db_path()?;
     let conn = Connection::open(db_path).map_err(|err| err.to_string())?;
-    conn.execute(
-        "CREATE TABLE IF NOT EXISTS app_runtime_state (key TEXT PRIMARY KEY, value TEXT NOT NULL)",
-        [],
-    )
-    .map_err(|err| err.to_string())?;
+    ensure_runtime_state(&conn)?;
     conn.execute(
         "INSERT INTO app_runtime_state (key, value) VALUES ('tracking_started_at', ?1) \
          ON CONFLICT(key) DO UPDATE SET value=excluded.value",
@@ -522,6 +630,57 @@ fn record_tracking_started() -> Result<(), String> {
     )
     .map_err(|err| err.to_string())?;
     Ok(())
+}
+
+fn ensure_runtime_state(conn: &Connection) -> Result<(), String> {
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS app_runtime_state (key TEXT PRIMARY KEY, value TEXT NOT NULL)",
+        [],
+    )
+    .map_err(|err| err.to_string())?;
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS recommendations (\
+         id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp TEXT NOT NULL, recommended_action TEXT, \
+         recommended_duration INTEGER, accepted INTEGER DEFAULT 0, started_at TEXT, completed_at TEXT, actual_duration REAL)",
+        [],
+    )
+    .map_err(|err| err.to_string())?;
+    Ok(())
+}
+
+fn runtime_value(conn: &Connection, key: &str) -> Option<String> {
+    conn.query_row(
+        "SELECT value FROM app_runtime_state WHERE key = ?1",
+        params![key],
+        |row| row.get(0),
+    )
+    .ok()
+}
+
+fn latest_recommended_break_minutes() -> i64 {
+    let Ok(db_path) = attentionos_db_path() else {
+        return 10;
+    };
+    let Ok(conn) = Connection::open(db_path) else {
+        return 10;
+    };
+    if !table_exists(&conn, "ml_predictions").unwrap_or(false) {
+        return 10;
+    }
+    conn.query_row(
+        "SELECT recommended_break_minutes FROM ml_predictions \
+         WHERE recommended_action LIKE 'BREAK_%' AND recommended_break_minutes IS NOT NULL \
+         ORDER BY id DESC LIMIT 1",
+        [],
+        |row| row.get::<_, i64>(0),
+    )
+    .unwrap_or(10)
+}
+
+fn parse_sqlite_time_utc(value: &str) -> Result<chrono::NaiveDateTime, chrono::ParseError> {
+    let normalized = value.replace('T', " ");
+    let trimmed = normalized.split('.').next().unwrap_or(&normalized);
+    chrono::NaiveDateTime::parse_from_str(trimmed, "%Y-%m-%d %H:%M:%S")
 }
 
 #[tauri::command]
@@ -898,6 +1057,10 @@ fn load_events_for_day(conn: &Connection, date: &str) -> Result<Vec<EventRow>, S
 }
 
 fn build_dashboard(date: String, db_path: PathBuf, events: Vec<EventRow>) -> DashboardPayload {
+    let state_history = Connection::open(&db_path)
+        .ok()
+        .map(|conn| state_history(&conn, &date).unwrap_or_default())
+        .unwrap_or_default();
     let timed_events = timed_events(&events);
     let event_count = events.len() as i64;
     let active_seconds = timed_events
@@ -907,7 +1070,7 @@ fn build_dashboard(date: String, db_path: PathBuf, events: Vec<EventRow>) -> Das
         .sum::<i64>();
     let focused_seconds = timed_events
         .iter()
-        .filter(|item| is_active_event(item.event) && !is_distraction(&item.event.process_name))
+        .filter(|item| is_active_event(item.event))
         .map(|item| item.duration_seconds)
         .sum::<i64>();
     let context_switches = count_switches(&events);
@@ -948,7 +1111,7 @@ fn build_dashboard(date: String, db_path: PathBuf, events: Vec<EventRow>) -> Das
             Metric {
                 label: "Focused time".to_string(),
                 value: format_minutes(focused_minutes),
-                detail: "Non-idle work outside common distractions".to_string(),
+                detail: "Non-idle time for the selected task".to_string(),
             },
             Metric {
                 label: "Active time".to_string(),
@@ -973,6 +1136,7 @@ fn build_dashboard(date: String, db_path: PathBuf, events: Vec<EventRow>) -> Das
         timeline,
         top_apps,
         recent_sessions,
+        state_history,
     }
 }
 
@@ -1051,13 +1215,6 @@ fn clean_app_name(name: &str) -> String {
         .to_string()
 }
 
-fn is_distraction(process_name: &str) -> bool {
-    let lower = process_name.to_lowercase();
-    ["telegram", "discord", "whatsapp", "steam"]
-        .iter()
-        .any(|item| lower.contains(item))
-}
-
 fn is_active_event(event: &EventRow) -> bool {
     event.keyboard_events > 0 || event.mouse_events > 0 || event.idle_seconds < 120.0
 }
@@ -1098,9 +1255,17 @@ fn timeline_segments(events: &[TimedEvent<'_>]) -> Vec<TimelineSegment> {
     for item in events {
         let start = item.start_minute;
         let end = item.end_minute;
+        let is_idle = !is_active_event(item.event);
+        let app = if is_idle {
+            "Idle".to_string()
+        } else {
+            clean_app_name(&item.event.process_name)
+        };
+        let kind = if is_idle { "idle" } else { "app" }.to_string();
         if let Some(last) = segments.last_mut() {
-            if last.app == clean_app_name(&item.event.process_name)
+            if last.app == app
                 && last.task == item.event.task_label
+                && last.kind == kind
             {
                 last.end_minute = end;
                 last.duration_minutes = (last.end_minute - last.start_minute).max(1);
@@ -1108,8 +1273,9 @@ fn timeline_segments(events: &[TimedEvent<'_>]) -> Vec<TimelineSegment> {
             }
         }
         segments.push(TimelineSegment {
-            app: clean_app_name(&item.event.process_name),
+            app,
             task: item.event.task_label.clone(),
+            kind,
             start_minute: start,
             end_minute: end,
             duration_minutes: (end - start).max(1),
@@ -1119,21 +1285,82 @@ fn timeline_segments(events: &[TimedEvent<'_>]) -> Vec<TimelineSegment> {
 }
 
 fn recent_sessions(events: &[TimedEvent<'_>]) -> Vec<RecentSession> {
-    timeline_segments(events)
-        .into_iter()
-        .rev()
-        .take(8)
-        .map(|segment| RecentSession {
-            time: format!(
-                "{:02}:{:02}",
-                segment.start_minute / 60,
-                segment.start_minute % 60
-            ),
-            application: segment.app,
-            duration_minutes: segment.duration_minutes,
-            task: segment.task,
+    let mut blocks: Vec<RecentSession> = Vec::new();
+    let mut current_start = 0;
+    let mut current_end = 0;
+    let mut current_task: Option<String> = None;
+    let mut apps = BTreeMap::<String, bool>::new();
+    for item in events.iter().filter(|item| is_active_event(item.event)) {
+        let task = item.event.task_label.clone();
+        let gap = if current_end == 0 { 0 } else { item.start_minute - current_end };
+        let should_split = current_end == 0 || current_task != task || gap > 10;
+        if should_split && current_end > current_start {
+            blocks.push(work_block(current_start, current_end, current_task.clone(), &apps));
+            apps.clear();
+        }
+        if should_split {
+            current_start = item.start_minute;
+            current_task = task;
+        }
+        current_end = item.end_minute;
+        apps.insert(clean_app_name(&item.event.process_name), true);
+    }
+    if current_end > current_start {
+        blocks.push(work_block(current_start, current_end, current_task, &apps));
+    }
+    blocks.into_iter().rev().take(8).collect()
+}
+
+fn work_block(
+    start: i64,
+    end: i64,
+    task: Option<String>,
+    apps: &BTreeMap<String, bool>,
+) -> RecentSession {
+    RecentSession {
+        time: format!(
+            "{:02}:{:02}-{:02}:{:02}",
+            start / 60,
+            start % 60,
+            end / 60,
+            end % 60
+        ),
+        application: apps.keys().cloned().collect::<Vec<_>>().join(", "),
+        duration_minutes: (end - start).max(1),
+        task,
+    }
+}
+
+fn state_history(conn: &Connection, date: &str) -> Result<Vec<StatePoint>, String> {
+    if !table_exists(conn, "ml_predictions")? {
+        return Ok(Vec::new());
+    }
+    let mut stmt = conn
+        .prepare(
+            "SELECT timestamp, effectiveness, decline_30m, recommended_action \
+             FROM ml_predictions \
+             WHERE substr(datetime(timestamp, 'localtime'), 1, 10) = ?1 \
+             ORDER BY timestamp ASC",
+        )
+        .map_err(|err| err.to_string())?;
+    let rows = stmt
+        .query_map(params![date], |row| {
+            let timestamp: String = row.get(0)?;
+            let action: Option<String> = row.get(3)?;
+            Ok(StatePoint {
+                minute: minute_of_day(&timestamp),
+                effectiveness: row.get::<_, Option<f64>>(1)?.unwrap_or(0.0),
+                decline_risk: row.get::<_, Option<f64>>(2)?.unwrap_or(0.0),
+                state: if action.unwrap_or_default().starts_with("BREAK") {
+                    "break".to_string()
+                } else {
+                    "work".to_string()
+                },
+            })
         })
-        .collect()
+        .map_err(|err| err.to_string())?;
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|err| err.to_string())
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -1215,6 +1442,9 @@ pub fn run() {
             evaluate_recommendations,
             get_demo_ml_prediction,
             create_test_notification,
+            start_break,
+            finish_break,
+            get_break_state,
             get_settings,
             save_settings,
             start_tracking,

@@ -16,21 +16,27 @@ The product loop is:
 
 ```text
 Windows telemetry
-        ↓
+        ->
 Local SQLite
-        ↓
+        ->
 Feature engineering
-        ↓
+        ->
 Personal baseline
-        ↓
+        ->
 ML model
-        ↓
+        ->
 Prediction
-        ↓
+        ->
 Intervention
-        ↓
+        ->
 Outcome feedback
 ```
+
+## Screenshots
+
+![AttentionOS dashboard](docs/attentionos-redesign-dashboard.png)
+
+![AttentionOS compact dashboard](docs/attentionos-redesign-dashboard-compact.png)
 
 ## How It Works
 
@@ -75,25 +81,23 @@ end-to-end personalization pipeline:
 
 ```text
 Telemetry
-        ↓
+        ->
 Rolling features
-        ↓
+        ->
 Personal baseline
-        ↓
+        ->
 CatBoost demo models
-        ↓
+        ->
 Current effectiveness estimate
-        ↓
+        ->
 Decline risk
-        ↓
+        ->
 Break benefit / recommendation
-        ↓
+        ->
 UI
 ```
 
 **Demo model trained on synthetic data.**
-
-**Демо-модель обучена на синтетических данных.**
 
 Synthetic data is generated separately from the production SQLite database and is
 stored under `data/demo/`:
@@ -138,7 +142,7 @@ and the synthetic-data disclaimer.
 The first real ML task is:
 
 ```text
-Predict current self-reported effectiveness ∈ {1, 2, 3, 4, 5}
+Predict current self-reported effectiveness in {1, 2, 3, 4, 5}
 ```
 
 Self-reported effectiveness is used as the initial supervised learning target.
@@ -166,13 +170,6 @@ Window titles are disabled by default in runtime settings. Keyboard and mouse
 activity are stored only as aggregate counts.
 
 AttentionOS does NOT diagnose fatigue or any medical/psychological condition.
-
-## Screenshots
-
-Dashboard screenshots are stored in:
-
-- `docs/attentionos-redesign-dashboard.png`
-- `docs/attentionos-redesign-dashboard-compact.png`
 
 ## Installation
 

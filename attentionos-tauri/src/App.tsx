@@ -4,9 +4,10 @@ import { isPermissionGranted, requestPermission, sendNotification } from '@tauri
 import './App.css'
 
 type Metric = { label: string; value: string; detail: string }
-type TimelineSegment = { app: string; task?: string | null; start_minute: number; end_minute: number; duration_minutes: number }
+type TimelineSegment = { app: string; task?: string | null; kind?: string; start_minute: number; end_minute: number; duration_minutes: number }
 type AppUsage = { name: string; duration_minutes: number; percent: number }
 type RecentSession = { time: string; application: string; duration_minutes: number; task?: string | null }
+type StatePoint = { minute: number; effectiveness: number; decline_risk: number; state: string }
 type DashboardPayload = {
   date: string
   db_path: string
@@ -19,8 +20,10 @@ type DashboardPayload = {
   timeline: TimelineSegment[]
   top_apps: AppUsage[]
   recent_sessions: RecentSession[]
+  state_history: StatePoint[]
 }
 type NotificationPayload = { id: number; created_at: string; title: string; body: string; state: string; kind: string }
+type BreakState = { state: string; recommended_minutes?: number | null; started_at?: string | null; planned_until?: string | null; elapsed_seconds: number; remaining_seconds: number }
 type RuntimeSettings = {
   preferences: { language: string; theme: string; launch_on_startup: boolean; minimize_to_tray: boolean; start_minimized: boolean; current_task_label: string }
   tracking: { idle_threshold_minutes: number; track_active_window: boolean; track_window_titles: boolean; track_keyboard_activity: boolean; track_mouse_activity: boolean; excluded_applications: string[] }
@@ -56,7 +59,7 @@ type DemoPrediction = {
 }
 
 const palette = ['#2F8F83', '#4D7EA8', '#7A6FBC', '#B8794A', '#4E937A', '#8C6A56', '#68758E']
-const defaultTasks = ['Coding', 'ML', 'Math', 'English', 'Rest', 'Meeting', 'Admin', 'Other']
+const defaultTaskIds = ['work', 'rest', 'gaming', 'other']
 
 const ru = {
   subtitle: '\u041b\u043e\u043a\u0430\u043b\u044c\u043d\u0430\u044f \u0430\u043d\u0430\u043b\u0438\u0442\u0438\u043a\u0430 \u0444\u043e\u043a\u0443\u0441\u0430',
@@ -70,6 +73,7 @@ const ru = {
   noData: '\u0414\u0430\u043d\u043d\u044b\u0445 \u043f\u043e\u043a\u0430 \u043d\u0435\u0442',
   noDataText: '\u0417\u0430\u043f\u0443\u0441\u0442\u0438 \u043e\u0442\u0441\u043b\u0435\u0436\u0438\u0432\u0430\u043d\u0438\u0435, \u0438 \u0437\u0434\u0435\u0441\u044c \u043f\u043e\u044f\u0432\u0438\u0442\u0441\u044f \u0442\u0430\u0439\u043c\u043b\u0430\u0439\u043d.',
   activityPattern: '\u041f\u0430\u0442\u0442\u0435\u0440\u043d \u0430\u043a\u0442\u0438\u0432\u043d\u043e\u0441\u0442\u0438',
+  stateHistory: '\u0418\u0441\u0442\u043e\u0440\u0438\u044f \u0441\u043e\u0441\u0442\u043e\u044f\u043d\u0438\u044f',
   topApps: '\u0422\u043e\u043f \u043f\u0440\u0438\u043b\u043e\u0436\u0435\u043d\u0438\u0439',
   recentSessions: '\u041f\u043e\u0441\u043b\u0435\u0434\u043d\u0438\u0435 \u0441\u0435\u0441\u0441\u0438\u0438',
   time: '\u0412\u0440\u0435\u043c\u044f',
@@ -98,6 +102,7 @@ const ru = {
   loading: '\u0417\u0430\u0433\u0440\u0443\u0437\u043a\u0430',
   refresh: '\u041e\u0431\u043d\u043e\u0432\u0438\u0442\u044c',
   unassigned: '\u0411\u0435\u0437 \u0437\u0430\u0434\u0430\u0447\u0438',
+  idle: '\u0411\u0435\u0437\u0434\u0435\u0439\u0441\u0442\u0432\u0438\u0435',
   focused: '\u0424\u043e\u043a\u0443\u0441',
   active: '\u0410\u043a\u0442\u0438\u0432\u043d\u043e',
   switches: '\u041f\u0435\u0440\u0435\u043a\u043b\u044e\u0447\u0435\u043d\u0438\u044f',
@@ -116,18 +121,20 @@ const ru = {
   values: { system: '\u0421\u0438\u0441\u0442\u0435\u043c\u043d\u043e', light: '\u0421\u0432\u0435\u0442\u043b\u0430\u044f', dark: '\u0422\u0451\u043c\u043d\u0430\u044f', localSqlite: '\u0422\u043e\u043b\u044c\u043a\u043e \u043b\u043e\u043a\u0430\u043b\u044c\u043d\u044b\u0439 SQLite', never: '\u041d\u0438\u043a\u043e\u0433\u0434\u0430 \u043d\u0435 \u0437\u0430\u043f\u0438\u0441\u044b\u0432\u0430\u0435\u0442\u0441\u044f', collecting: '\u0421\u0431\u043e\u0440 \u0434\u0430\u043d\u043d\u044b\u0445', trainingLater: '\u0421\u0442\u0430\u043d\u0435\u0442 \u0434\u043e\u0441\u0442\u0443\u043f\u043d\u043e \u043f\u043e\u0441\u043b\u0435 \u0434\u043e\u0441\u0442\u0430\u0442\u043e\u0447\u043d\u043e\u0433\u043e \u0447\u0438\u0441\u043b\u0430 \u043e\u0442\u0447\u0451\u0442\u043e\u0432' },
   actions: { exportData: '\u042d\u043a\u0441\u043f\u043e\u0440\u0442 \u0434\u0430\u043d\u043d\u044b\u0445', deleteTelemetry: '\u0423\u0434\u0430\u043b\u0438\u0442\u044c \u0442\u0435\u043b\u0435\u043c\u0435\u0442\u0440\u0438\u044e', deleteReports: '\u0423\u0434\u0430\u043b\u0438\u0442\u044c \u043e\u0442\u0447\u0451\u0442\u044b', deleteInterventions: '\u0423\u0434\u0430\u043b\u0438\u0442\u044c \u0440\u0435\u043a\u043e\u043c\u0435\u043d\u0434\u0430\u0446\u0438\u0438', deleteModel: '\u0423\u0434\u0430\u043b\u0438\u0442\u044c \u043c\u043e\u0434\u0435\u043b\u044c', deleteAll: '\u0423\u0434\u0430\u043b\u0438\u0442\u044c \u0432\u0441\u0451 \u043b\u043e\u043a\u0430\u043b\u044c\u043d\u043e', add: '\u0414\u043e\u0431\u0430\u0432\u0438\u0442\u044c', testNotification: '\u041e\u0442\u043f\u0440\u0430\u0432\u0438\u0442\u044c \u0442\u0435\u0441\u0442\u043e\u0432\u043e\u0435' },
   report: { title: '\u041a\u0430\u043a \u043f\u0440\u043e\u0448\u043b\u0430 \u0441\u0435\u0441\u0441\u0438\u044f?', subtitle: '\u041a\u043e\u0440\u043e\u0442\u043a\u0438\u0439 \u043e\u0442\u0447\u0451\u0442 \u0434\u043b\u044f \u043b\u0438\u0447\u043d\u043e\u0439 \u043c\u043e\u0434\u0435\u043b\u0438.', effectiveness: '\u042d\u0444\u0444\u0435\u043a\u0442\u0438\u0432\u043d\u043e\u0441\u0442\u044c', fatigue: '\u0423\u0441\u0442\u0430\u043b\u043e\u0441\u0442\u044c', difficulty: '\u0421\u043b\u043e\u0436\u043d\u043e\u0441\u0442\u044c', note: '\u0417\u0430\u043c\u0435\u0442\u043a\u0430', notePlaceholder: '\u041d\u0435\u043e\u0431\u044f\u0437\u0430\u0442\u0435\u043b\u044c\u043d\u043e', skip: '\u041f\u0440\u043e\u043f\u0443\u0441\u0442\u0438\u0442\u044c', save: '\u0421\u043e\u0445\u0440\u0430\u043d\u0438\u0442\u044c \u043e\u0442\u0447\u0451\u0442' },
+  tasks: { work: '\u0420\u0430\u0431\u043e\u0442\u0430', rest: '\u041e\u0442\u0434\u044b\u0445', gaming: '\u0418\u0433\u0440\u0430', other: '\u0414\u0440\u0443\u0433\u043e\u0435', none: '\u0411\u0435\u0437 \u0437\u0430\u0434\u0430\u0447\u0438' },
+  breakActions: { start: '\u041d\u0430\u0447\u0430\u0442\u044c \u043f\u0435\u0440\u0435\u0440\u044b\u0432', return: '\u0412\u0435\u0440\u043d\u0443\u0442\u044c\u0441\u044f \u043a \u0440\u0430\u0431\u043e\u0442\u0435', timer: '\u041f\u0435\u0440\u0435\u0440\u044b\u0432' },
 }
 const en = {
   subtitle: 'Local-first focus analytics', localOnly: 'Local only', notifications: 'Notifications', settings: 'Settings',
   currentState: 'Current state', timeline: 'Timeline', timelineHint: 'Full 24-hour local day from telemetry.',
   today: 'Today', noData: 'No focus data yet', noDataText: 'Start tracking and AttentionOS will build your timeline.',
-  activityPattern: 'Activity Pattern', topApps: 'Top Apps', recentSessions: 'Recent Sessions', time: 'Time', app: 'Application',
+  activityPattern: 'Activity Pattern', stateHistory: 'State history', topApps: 'Top Apps', recentSessions: 'Recent Sessions', time: 'Time', app: 'Application',
   duration: 'Duration', task: 'Task', currentTask: 'Current task', addTask: 'Add', startTracking: 'Start tracking',
   stopTracking: 'Stop', tracking: 'Tracking', stopped: 'Stopped', checkIn: 'Check in', save: 'Save', close: 'Close',
   exported: 'Exported', deleted: 'Deleted',
   demo: 'DEMO', demoModel: 'Demo ML', demoDisclaimer: 'Demo model trained on synthetic data.',
   declineRisk: 'Decline risk', effectiveness: 'Effectiveness', breakBenefit: 'Break benefit', recommendation: 'Recommendation', collectingData: 'Collecting data',
-  loading: 'Loading', refresh: 'Refresh', unassigned: 'Unassigned', focused: 'Focused', active: 'Active', switches: 'Switches', noAppUsage: 'No app usage yet.',
+  loading: 'Loading', refresh: 'Refresh', unassigned: 'Unassigned', idle: 'Idle', focused: 'Focused', active: 'Active', switches: 'Switches', noAppUsage: 'No app usage yet.',
   notificationHint: 'Break recommendations and system notes.', noNotifications: 'No notifications', notificationEmptyText: 'Recommendations will appear here and in Windows.',
   settingsSubtitle: 'Editable runtime preferences used by the collector.',
   tabs: { general: 'General', tracking: 'Tracking', notifications: 'Notifications', privacy: 'Data', model: 'Model' },
@@ -140,6 +147,8 @@ const en = {
   values: { system: 'System', light: 'Light', dark: 'Dark', localSqlite: 'Local SQLite only', never: 'Never recorded', collecting: 'Collecting data', trainingLater: 'Unavailable until enough self-reports exist' },
   actions: { exportData: 'Export data', deleteTelemetry: 'Delete telemetry', deleteReports: 'Delete self reports', deleteInterventions: 'Delete interventions', deleteModel: 'Delete model', deleteAll: 'Delete all local data', add: 'Add', testNotification: 'Send test notification' },
   report: { title: 'How was that session?', subtitle: 'A short check-in for the personal model.', effectiveness: 'Effectiveness', fatigue: 'Fatigue', difficulty: 'Difficulty', note: 'Note', notePlaceholder: 'Optional', skip: 'Skip', save: 'Save report' },
+  tasks: { work: 'Work', rest: 'Rest', gaming: 'Gaming', other: 'Other', none: 'Unassigned' },
+  breakActions: { start: 'Start break', return: 'Return to work', timer: 'Break' },
 }
 
 function lang(settings: RuntimeSettings | null): 'en' | 'ru' { return settings?.preferences.language === 'ru' ? 'ru' : 'en' }
@@ -155,6 +164,7 @@ function shiftDate(value: string, days: number) { const date = new Date(`${value
 function formatDate(value: string, language: 'en' | 'ru' = 'en') { return new Intl.DateTimeFormat(language === 'ru' ? 'ru-RU' : 'en', { weekday: 'short', month: 'short', day: 'numeric' }).format(new Date(`${value}T12:00:00`)) }
 function formatMinutes(minutes: number) { const h = Math.floor(minutes / 60); const m = minutes % 60; return h > 0 ? `${h}h ${String(m).padStart(2, '0')}m` : `${m}m` }
 function formatClock(minute: number) { return `${String(Math.floor(minute / 60)).padStart(2, '0')}:${String(minute % 60).padStart(2, '0')}` }
+function formatSeconds(seconds: number) { const m = Math.floor(Math.max(seconds, 0) / 60); const s = Math.max(seconds, 0) % 60; return `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}` }
 function pct(value?: number | null) { return value == null ? '-' : `${Math.round(value * 100)}%` }
 function effectiveTheme(settings: RuntimeSettings | null) { return !settings || settings.preferences.theme === 'system' ? 'light' : settings.preferences.theme }
 async function ensureNotificationPermission() {
@@ -181,20 +191,22 @@ function App() {
   const [tracking, setTracking] = useState(false)
   const [customTask, setCustomTask] = useState('')
   const [lastToastId, setLastToastId] = useState(0)
+  const [breakState, setBreakState] = useState<BreakState | null>(null)
   const t = tx(settings)
 
   async function refresh(target = date, showLoading = false) {
     if (showLoading) setLoading(true)
     setError(null)
     try {
-      const [dash, notes, runtime, active, demo] = await Promise.all([
+      const [dash, notes, runtime, active, demo, currentBreak] = await Promise.all([
         invoke<DashboardPayload>('get_dashboard', { date: target }),
         invoke<NotificationPayload[]>('get_notifications', { limit: 8 }),
         invoke<RuntimeSettings>('get_settings'),
         invoke<boolean>('get_tracking_status'),
         invoke<DemoPrediction>('get_demo_ml_prediction'),
+        invoke<BreakState>('get_break_state'),
       ])
-      setDashboard(applyDemoMetric(dash, demo)); setNotifications(notes); setSettings(runtime); setTracking(active); setDemoPrediction(demo); setSelectedSegment(dash.timeline.at(-1) ?? null)
+      setDashboard(applyDemoMetric(dash, demo)); setNotifications(notes); setSettings(runtime); setTracking(active); setDemoPrediction(demo); setBreakState(currentBreak); setSelectedSegment(dash.timeline.at(-1) ?? null)
     } catch (err) { setError(err instanceof Error ? err.message : String(err)) } finally { if (showLoading) setLoading(false) }
   }
 
@@ -225,12 +237,14 @@ function App() {
   }, [tracking, settings?.notifications.break_recommendations, settings?.notifications.live_check_interval_seconds, lastToastId])
   const unreadCount = notifications.filter((item) => item.state === 'unread').length
   const appColor = useMemo(() => { const map = new Map<string, string>(); dashboard?.timeline.forEach((s) => { if (!map.has(s.app)) map.set(s.app, palette[map.size % palette.length]) }); return map }, [dashboard?.timeline])
-  const taskOptions = useMemo(() => Array.from(new Set(['None', ...defaultTasks, ...(settings?.preferences.current_task_label && settings.preferences.current_task_label !== 'None' ? [settings.preferences.current_task_label] : [])])), [settings?.preferences.current_task_label])
+  const taskOptions = useMemo(() => Array.from(new Set(['None', ...defaultTaskIds, ...(settings?.preferences.current_task_label && !['None', ...defaultTaskIds].includes(settings.preferences.current_task_label) ? [settings.preferences.current_task_label] : [])])), [settings?.preferences.current_task_label])
 
   async function saveRuntimeSettings(next: RuntimeSettings) { await invoke('save_settings', { settings: next }); setSettings(next) }
   async function setCurrentTask(task: string) { if (!settings) return; await saveRuntimeSettings({ ...settings, preferences: { ...settings.preferences, current_task_label: task } }) }
   async function addTask() { const task = customTask.trim(); if (!task) return; await setCurrentTask(task); setCustomTask('') }
   async function toggleTracking() { if (tracking) { await invoke('stop_tracking'); setTracking(false) } else { if (settings) await saveRuntimeSettings(settings); await invoke('start_tracking'); setTracking(true) } await refresh(date, true) }
+  async function startBreak() { await invoke('start_break', { minutes: demoPrediction?.recommended_break_minutes ?? breakState?.recommended_minutes ?? 10 }); await refresh(date, true) }
+  async function finishBreak() { await invoke('finish_break'); await refresh(date, true) }
   async function markRead(id: number) { await invoke('mark_notification_read', { id }); await refresh(date, true) }
   async function sendTestNotification() {
     const note = await invoke<NotificationPayload>('create_test_notification')
@@ -244,12 +258,12 @@ function App() {
     <main className="shell" data-theme={effectiveTheme(settings)}>
       <header className="topbar"><div><div className="brand">AttentionOS</div><div className="subtle">{t.subtitle}</div></div><div className="topbar-actions"><span className="privacy-pill">{t.localOnly}</span><button type="button" className="icon-button" onClick={() => refresh()} aria-label="Refresh">R</button><button type="button" className="button ghost" onClick={() => setNotificationsOpen(true)}>{t.notifications}{unreadCount > 0 && <span className="badge">{unreadCount}</span>}</button><button type="button" className="button ghost" onClick={() => setSettingsOpen(true)}>{t.settings}</button></div></header>
       {error && <div className="error">Could not load AttentionOS data: {error}</div>}
-      <section className="tracking-card"><div className="tracking-status"><span className={tracking ? 'pulse-dot active' : 'pulse-dot'} /><strong>{tracking ? t.tracking : t.stopped}</strong></div><label className="task-select"><span>{t.currentTask}</span><select value={settings?.preferences.current_task_label ?? 'None'} onChange={(e) => setCurrentTask(e.target.value)}>{taskOptions.map((task) => <option value={task} key={task}>{task}</option>)}</select></label><div className="inline-input task-add"><input value={customTask} onChange={(e) => setCustomTask(e.target.value)} placeholder={t.addTask} /><button type="button" onClick={addTask}>{t.actions.add}</button></div><button type="button" className={`button ${tracking ? 'danger' : 'primary'}`} onClick={toggleTracking}>{tracking ? t.stopTracking : t.startTracking}</button><button type="button" className="button" onClick={() => setSelfReportOpen(true)}>{t.checkIn}</button></section>
+      <section className="tracking-card"><div className="tracking-status"><span className={tracking ? 'pulse-dot active' : 'pulse-dot'} /><strong>{tracking ? t.tracking : t.stopped}</strong></div><label className="task-select"><span>{t.currentTask}</span><select value={settings?.preferences.current_task_label ?? 'None'} onChange={(e) => setCurrentTask(e.target.value)}>{taskOptions.map((task) => <option value={task} key={task}>{displayTask(task, t)}</option>)}</select></label><div className="inline-input task-add"><input value={customTask} onChange={(e) => setCustomTask(e.target.value)} placeholder={t.addTask} /><button type="button" onClick={addTask}>{t.actions.add}</button></div><button type="button" className={`button ${tracking ? 'danger' : 'primary'}`} onClick={toggleTracking}>{tracking ? t.stopTracking : t.startTracking}</button><button type="button" className="button" onClick={() => setSelfReportOpen(true)}>{t.checkIn}</button></section>
       <section className="hero-grid"><article className="state-card"><div className="eyebrow">{translateMetric(dashboard?.current_state.label ?? t.currentState, lang(settings))} <span className="demo-badge" title={t.demoDisclaimer}>{t.demo}</span></div><h1>{loading ? t.loading : demoStateTitle(demoPrediction, lang(settings), dashboard?.current_state.value)}</h1><p>{demoPrediction?.status === 'ready' ? t.demoDisclaimer : translateMetricDetail(dashboard?.current_state.detail ?? '', lang(settings))}</p><div className="state-meta"><span>{formatDate(date, lang(settings))}</span><span>{dashboard?.event_count ?? 0} {lang(settings) === 'ru' ? '\u0441\u043e\u0431\u044b\u0442\u0438\u0439' : 'events'}</span></div></article><div className="metrics-grid">{(dashboard?.metrics ?? []).map((m) => <article className="metric-card" key={m.label}><div className="metric-label">{translateMetric(m.label, lang(settings))}</div><div className="metric-value">{m.value}</div><div className="metric-detail">{translateMetricDetail(m.detail, lang(settings))}</div></article>)}</div></section>
-      {demoPrediction && <section className="panel demo-panel"><div className="panel-header"><div><h2>{t.demoModel} <span className="demo-badge" title={t.demoDisclaimer}>{t.demo}</span></h2><p>{demoPrediction.status === 'ready' ? t.demoDisclaimer : (demoPrediction.reason ?? t.collectingData)}</p></div><strong>{demoPrediction.model_version ?? 'demo-v1'}</strong></div><div className="demo-grid"><MetricPill label={t.effectiveness} value={demoPrediction.status === 'ready' ? `${demoPrediction.current_effectiveness?.toFixed(0)}/100` : `${Math.round(demoPrediction.telemetry_available_minutes ?? demoPrediction.active_minutes ?? 0)}m`} /><MetricPill label={`${t.declineRisk} 15/30/60`} value={demoPrediction.status === 'ready' ? `${pct(demoPrediction.decline_15m)} / ${pct(demoPrediction.decline_30m)} / ${pct(demoPrediction.decline_60m)}` : '-'} /><MetricPill label={t.breakBenefit} value={demoPrediction.status === 'ready' ? `${(demoPrediction.break_benefit ?? 0).toFixed(1)}/10` : '-'} /><MetricPill label={t.recommendation} value={localizeDemoAction(demoPrediction.recommended_action ?? demoPrediction.recommendation?.action ?? 'CONTINUE', lang(settings), demoPrediction.recommended_break_minutes)} /></div>{demoPrediction.signals && <div className="signal-list">{demoPrediction.signals.slice(0, 5).map((signal) => <span key={signal.name}>{localizeSignal(signal.label ?? signal.name, lang(settings))}: {signal.value}{signal.unit ? ` ${signal.unit}` : ''}</span>)}</div>}</section>}
-      <section className="panel timeline-panel"><div className="panel-header"><div><h2>{t.timeline}</h2><p>{t.timelineHint}</p></div><div className="date-nav"><button type="button" onClick={() => setDate(shiftDate(date, -1))}>{'<'}</button><span>{date === todayIso() ? t.today : formatDate(date, lang(settings))}</span><button type="button" onClick={() => setDate(shiftDate(date, 1))}>{'>'}</button></div></div>{dashboard && dashboard.timeline.length > 0 ? <div className="timeline"><div className="timeline-track">{dashboard.timeline.map((segment, index) => { const dayStart = 0; const dayEnd = 24 * 60; const start = Math.max(segment.start_minute, dayStart); const end = Math.min(segment.end_minute, dayEnd); if (end <= dayStart || start >= dayEnd) return null; const left = ((start - dayStart) / (dayEnd - dayStart)) * 100; const width = Math.max(((end - start) / (dayEnd - dayStart)) * 100, 0.25); const selected = selectedSegment?.app === segment.app && selectedSegment?.start_minute === segment.start_minute; return <button type="button" className={`timeline-segment ${selected ? 'selected' : ''}`} key={`${segment.app}-${segment.start_minute}-${index}`} style={{ left: `${left}%`, width: `${width}%`, background: appColor.get(segment.app) }} title={`${segment.app} - ${formatMinutes(segment.duration_minutes)}`} onClick={() => setSelectedSegment(segment)} onMouseEnter={() => setSelectedSegment(segment)} /> })}</div><div className="timeline-axis"><span>00:00</span><span>06:00</span><span>12:00</span><span>18:00</span><span>24:00</span></div>{selectedSegment && <div className="timeline-detail"><strong>{selectedSegment.app}</strong><span>{formatClock(selectedSegment.start_minute)}-{formatClock(selectedSegment.end_minute)}</span><span>{formatMinutes(selectedSegment.duration_minutes)}</span><span>{t.task}: {selectedSegment.task ?? t.unassigned}</span></div>}</div> : <div className="empty-state"><h3>{t.noData}</h3><p>{t.noDataText}</p></div>}</section>
-      <section className="analytics-grid"><article className="panel"><div className="panel-header"><div><h2>{t.activityPattern}</h2><p>{lang(settings) === 'ru' ? '\u0424\u043e\u043a\u0443\u0441 \u0438 \u0430\u043a\u0442\u0438\u0432\u043d\u043e\u0435 \u0432\u0440\u0435\u043c\u044f.' : 'Focused vs active minutes.'}</p></div></div><div className="bar-comparison"><Bar label="Focused" value={dashboard?.focused_minutes ?? 0} max={dashboard?.active_minutes ?? 1} lang={lang(settings)} /><Bar label="Active" value={dashboard?.active_minutes ?? 0} max={dashboard?.active_minutes ?? 1} lang={lang(settings)} /><Bar label="Switches" value={dashboard?.context_switches ?? 0} max={Math.max(dashboard?.context_switches ?? 0, 40)} lang={lang(settings)} /></div></article><article className="panel"><div className="panel-header"><div><h2>{t.topApps}</h2><p>{lang(settings) === 'ru' ? '\u041f\u043e \u0430\u043a\u0442\u0438\u0432\u043d\u043e\u043c\u0443 \u0432\u0440\u0435\u043c\u0435\u043d\u0438.' : 'Ranked by active foreground time.'}</p></div></div><div className="app-list">{(dashboard?.top_apps ?? []).length > 0 ? dashboard?.top_apps.map((app, index) => <div className="app-row" key={app.name}><span className="rank">{index + 1}</span><span className="app-name">{app.name}</span><span>{formatMinutes(app.duration_minutes)}</span><div className="progress"><span style={{ width: `${app.percent}%` }} /></div></div>) : <p className="muted">{t.noAppUsage}</p>}</div></article></section>
-      <section className="panel"><div className="panel-header"><div><h2>{t.recentSessions}</h2><p>{lang(settings) === 'ru' ? '\u041f\u043e\u0441\u043b\u0435\u0434\u043d\u0438\u0435 \u0431\u043b\u043e\u043a\u0438 \u0440\u0430\u0431\u043e\u0442\u044b.' : 'Latest foreground work blocks.'}</p></div><span className="muted">SQLite: {dashboard?.db_path}</span></div><div className="sessions-table"><div className="table-head"><span>{t.time}</span><span>{t.app}</span><span>{t.duration}</span><span>{t.task}</span></div>{(dashboard?.recent_sessions ?? []).map((s) => <div className="table-row" key={`${s.time}-${s.application}-${s.duration_minutes}`}><span>{s.time}</span><span>{s.application}</span><span>{formatMinutes(s.duration_minutes)}</span><span>{s.task ?? t.unassigned}</span></div>)}</div></section>
+      {demoPrediction && <section className="panel demo-panel"><div className="panel-header"><div><h2>{t.demoModel} <span className="demo-badge" title={t.demoDisclaimer}>{t.demo}</span></h2><p>{demoPrediction.status === 'ready' ? t.demoDisclaimer : (demoPrediction.reason ?? t.collectingData)}</p></div><strong>{demoPrediction.model_version ?? 'demo-v1'}</strong></div><div className="demo-grid"><MetricPill label={t.effectiveness} value={demoPrediction.status === 'ready' ? `${demoPrediction.current_effectiveness?.toFixed(0)}/100` : `${Math.round(demoPrediction.telemetry_available_minutes ?? demoPrediction.active_minutes ?? 0)}m`} /><MetricPill label={`${t.declineRisk} 15/30/60`} value={demoPrediction.status === 'ready' ? `${pct(demoPrediction.decline_15m)} / ${pct(demoPrediction.decline_30m)} / ${pct(demoPrediction.decline_60m)}` : '-'} /><MetricPill label={t.breakBenefit} value={demoPrediction.status === 'ready' ? `${(demoPrediction.break_benefit ?? 0).toFixed(1)}/10` : '-'} /><MetricPill label={t.recommendation} value={localizeDemoAction(demoPrediction.recommended_action ?? demoPrediction.recommendation?.action ?? 'CONTINUE', lang(settings), demoPrediction.recommended_break_minutes)} /></div><div className="break-actions">{demoPrediction.state === 'BREAK_RECOMMENDED' && breakState?.state !== 'BREAK' && <button type="button" className="button primary" onClick={startBreak}>{t.breakActions.start}</button>}{breakState?.state === 'BREAK' && <><span className="metric-pill compact"><span>{t.breakActions.timer}</span><strong>{formatSeconds(breakState.remaining_seconds)}</strong></span><button type="button" className="button primary" onClick={finishBreak}>{t.breakActions.return}</button></>}</div>{demoPrediction.signals && <div className="signal-list">{demoPrediction.signals.slice(0, 4).map((signal) => <span key={signal.name}>{localizeSignal(signal.label ?? signal.name, lang(settings))}: {signal.value}{signal.unit ? ` ${signal.unit}` : ''}</span>)}</div>}</section>}
+      <section className="panel timeline-panel"><div className="panel-header"><div><h2>{t.timeline}</h2><p>{t.timelineHint}</p></div><div className="date-nav"><button type="button" onClick={() => setDate(shiftDate(date, -1))}>{'<'}</button><span>{date === todayIso() ? t.today : formatDate(date, lang(settings))}</span><button type="button" onClick={() => setDate(shiftDate(date, 1))}>{'>'}</button></div></div>{dashboard && dashboard.timeline.length > 0 ? <div className="timeline"><div className="timeline-track">{dashboard.timeline.map((segment, index) => { const dayStart = 0; const dayEnd = 24 * 60; const start = Math.max(segment.start_minute, dayStart); const end = Math.min(segment.end_minute, dayEnd); if (end <= dayStart || start >= dayEnd) return null; const left = ((start - dayStart) / (dayEnd - dayStart)) * 100; const width = Math.max(((end - start) / (dayEnd - dayStart)) * 100, 0.25); const selected = selectedSegment?.app === segment.app && selectedSegment?.start_minute === segment.start_minute; return <button type="button" className={`timeline-segment ${segment.kind === 'idle' ? 'idle' : ''} ${selected ? 'selected' : ''}`} key={`${segment.app}-${segment.start_minute}-${index}`} style={{ left: `${left}%`, width: `${width}%`, background: segment.kind === 'idle' ? undefined : appColor.get(segment.app) }} title={`${displayApp(segment, t)} - ${formatMinutes(segment.duration_minutes)}`} onClick={() => setSelectedSegment(segment)} onMouseEnter={() => setSelectedSegment(segment)} /> })}</div><div className="timeline-axis"><span>00:00</span><span>06:00</span><span>12:00</span><span>18:00</span><span>24:00</span></div>{selectedSegment && <div className="timeline-detail"><strong>{displayApp(selectedSegment, t)}</strong><span>{formatClock(selectedSegment.start_minute)}-{formatClock(selectedSegment.end_minute)}</span><span>{formatMinutes(selectedSegment.duration_minutes)}</span><span>{t.task}: {displayTask(selectedSegment.task, t)}</span></div>}</div> : <div className="empty-state"><h3>{t.noData}</h3><p>{t.noDataText}</p></div>}</section>
+      <section className="analytics-grid"><article className="panel"><div className="panel-header"><div><h2>{t.stateHistory}</h2><p>{lang(settings) === 'ru' ? 'Эффективность, риск снижения и перерывы за день.' : 'Effectiveness, decline risk, and breaks across the day.'}</p></div></div><StateHistory points={dashboard?.state_history ?? []} t={t} /></article><article className="panel"><div className="panel-header"><div><h2>{t.topApps}</h2><p>{lang(settings) === 'ru' ? '\u041f\u043e \u0430\u043a\u0442\u0438\u0432\u043d\u043e\u043c\u0443 \u0432\u0440\u0435\u043c\u0435\u043d\u0438.' : 'Ranked by active foreground time.'}</p></div></div><div className="app-list">{(dashboard?.top_apps ?? []).length > 0 ? dashboard?.top_apps.map((app, index) => <div className="app-row" key={app.name}><span className="rank">{index + 1}</span><span className="app-name">{app.name}</span><span>{formatMinutes(app.duration_minutes)}</span><div className="progress"><span style={{ width: `${app.percent}%` }} /></div></div>) : <p className="muted">{t.noAppUsage}</p>}</div></article></section>
+      <section className="panel"><div className="panel-header"><div><h2>{t.recentSessions}</h2><p>{lang(settings) === 'ru' ? '\u041f\u043e\u0441\u043b\u0435\u0434\u043d\u0438\u0435 \u0431\u043b\u043e\u043a\u0438 \u0440\u0430\u0431\u043e\u0442\u044b.' : 'Latest foreground work blocks.'}</p></div></div><div className="sessions-table"><div className="table-head"><span>{t.time}</span><span>{t.app}</span><span>{t.duration}</span><span>{t.task}</span></div>{(dashboard?.recent_sessions ?? []).map((s) => <div className="table-row" key={`${s.time}-${s.application}-${s.duration_minutes}`}><span>{s.time}</span><span>{s.application}</span><span>{formatMinutes(s.duration_minutes)}</span><span>{displayTask(s.task, t)}</span></div>)}</div></section>
       {notificationsOpen && <NotificationsDrawer notifications={notifications} markRead={markRead} close={() => setNotificationsOpen(false)} t={t} />}
       {settingsOpen && settings && <SettingsModal dashboard={dashboard} demoPrediction={demoPrediction} settings={settings} unreadCount={unreadCount} ui={t} onClose={() => setSettingsOpen(false)} onTestNotification={sendTestNotification} onSave={async (next) => { await saveRuntimeSettings(next); setSettingsOpen(false); await refresh() }} />}
       {selfReportOpen && settings && <SelfReportModal settings={settings} ui={t} onClose={() => setSelfReportOpen(false)} onSaved={async () => { setSelfReportOpen(false); await refresh() }} />}
@@ -262,12 +276,22 @@ function NotificationsDrawer({ notifications, markRead, close, t }: { notificati
   return <aside className="drawer"><div className="drawer-backdrop" onClick={close} /><div className="drawer-panel"><div className="panel-header"><div><h2>{t.notifications}</h2><p>{t.notificationHint}</p></div><button type="button" className="icon-button" onClick={close}>x</button></div>{notifications.length > 0 ? notifications.map((item) => <button type="button" className="notification" key={item.id} onClick={() => markRead(item.id)}><span className={item.state === 'unread' ? 'dot active' : 'dot'} /><strong>{localizeNotificationTitle(item.title, language)}</strong><p>{localizeNotificationBody(item.body, language)}</p><small>{localizeNotificationMeta(item.kind, item.state, language)}</small></button>) : <div className="empty-state compact"><h3>{t.noNotifications}</h3><p>{t.notificationEmptyText}</p></div>}</div></aside>
 }
 
-function Bar({ label, value, max, lang }: { label: string; value: number; max: number; lang: 'en' | 'ru' }) {
-  return <div className="bar-row"><div><span>{translateMetric(label, lang)}</span><strong>{label === 'Switches' ? value : formatMinutes(value)}</strong></div><div className="bar-track"><span style={{ width: `${Math.min((value / Math.max(max, 1)) * 100, 100)}%` }} /></div></div>
-}
-
 function MetricPill({ label, value }: { label: string; value: string }) {
   return <div className="metric-pill"><span>{label}</span><strong>{value}</strong></div>
+}
+
+function StateHistory({ points, t }: { points: StatePoint[]; t: UiText }) {
+  if (points.length === 0) return <div className="empty-state compact"><h3>{t.noData}</h3><p>{t.collectingData}</p></div>
+  return <div className="state-history">{points.slice(-96).map((point, index) => <span key={`${point.minute}-${index}`} className={point.state === 'break' ? 'break' : ''} title={`${formatClock(point.minute)} | ${t.effectiveness}: ${Math.round(point.effectiveness)} | ${t.declineRisk}: ${Math.round(point.decline_risk * 100)}%`} style={{ left: `${(point.minute / 1440) * 100}%`, bottom: `${Math.max(4, Math.min(point.effectiveness, 100))}%` }}><i style={{ height: `${Math.max(2, Math.round(point.decline_risk * 48))}px` }} /></span>)}</div>
+}
+
+function displayTask(task: string | null | undefined, t: UiText) {
+  if (!task || task === 'None') return t.tasks.none
+  return (t.tasks as Record<string, string>)[task] ?? task
+}
+
+function displayApp(segment: TimelineSegment, t: UiText) {
+  return segment.kind === 'idle' ? t.idle : segment.app
 }
 
 function SettingsModal({ dashboard, demoPrediction, settings, unreadCount, ui, onClose, onTestNotification, onSave }: { dashboard: DashboardPayload | null; demoPrediction: DemoPrediction | null; settings: RuntimeSettings; unreadCount: number; ui: UiText; onClose: () => void; onTestNotification: () => Promise<void>; onSave: (settings: RuntimeSettings) => Promise<void> }) {
