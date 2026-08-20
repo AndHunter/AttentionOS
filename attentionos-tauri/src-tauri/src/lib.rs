@@ -245,6 +245,7 @@ fn get_dashboard(date: Option<String>) -> Result<DashboardPayload, String> {
 fn get_notifications(limit: Option<i64>) -> Result<Vec<NotificationPayload>, String> {
     let db_path = attentionos_db_path()?;
     let conn = Connection::open(db_path).map_err(|err| err.to_string())?;
+    ensure_runtime_state(&conn)?;
     let table_exists: i64 = conn
         .query_row(
             "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'notifications'",
@@ -533,7 +534,7 @@ fn get_latest_demo_ml_prediction() -> Result<serde_json::Value, String> {
              FROM ml_predictions ORDER BY id DESC LIMIT 1",
         )
         .map_err(|err| err.to_string())?;
-    let prediction = stmt
+    let mut prediction = stmt
         .query_row([], |row| {
             let action: String = row.get(7)?;
             let break_minutes: Option<i64> = row.get(8)?;
@@ -571,6 +572,20 @@ fn get_latest_demo_ml_prediction() -> Result<serde_json::Value, String> {
             }))
         })
         .map_err(|err| err.to_string())?;
+    if break_ignore_active(&conn) {
+        prediction["state"] = serde_json::json!("WORK");
+        prediction["recommended_action"] = serde_json::json!("CONTINUE");
+        prediction["recommended_break_minutes"] = serde_json::Value::Null;
+        prediction["next_break_eta_minutes"] = serde_json::json!(5);
+        prediction["policy_source"] = serde_json::json!("FALLBACK");
+        prediction["recommendation"]["action"] = serde_json::json!("CONTINUE");
+        prediction["recommendation"]["state"] = serde_json::json!("WORK");
+        prediction["recommendation"]["title"] = serde_json::json!("Work");
+        prediction["recommendation"]["reason"] =
+            serde_json::json!("ignore_cooldown: user ignored the break recommendation.");
+        prediction["recommendation"]["recommended_break_minutes"] = serde_json::Value::Null;
+        prediction["recommendation"]["policy_source"] = serde_json::json!("FALLBACK");
+    }
     Ok(prediction)
 }
 
@@ -680,6 +695,12 @@ fn ignore_break() -> Result<BreakStatePayload, String> {
         "INSERT INTO app_runtime_state (key, value) VALUES (?1, ?2) \
          ON CONFLICT(key) DO UPDATE SET value=excluded.value",
         params!["break_ignore_until", until.to_string()],
+    )
+    .map_err(|err| err.to_string())?;
+    conn.execute(
+        "INSERT INTO app_runtime_state (key, value) VALUES (?1, ?2) \
+         ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+        params!["break_state", "WORK"],
     )
     .map_err(|err| err.to_string())?;
     get_break_state()
@@ -882,6 +903,16 @@ fn runtime_value(conn: &Connection, key: &str) -> Option<String> {
         |row| row.get(0),
     )
     .ok()
+}
+
+fn break_ignore_active(conn: &Connection) -> bool {
+    let Some(value) = runtime_value(conn, "break_ignore_until") else {
+        return false;
+    };
+    let Ok(until) = parse_sqlite_time_utc(&value) else {
+        return false;
+    };
+    chrono::Utc::now().naive_utc() < until
 }
 
 fn latest_recommended_break_minutes() -> i64 {
