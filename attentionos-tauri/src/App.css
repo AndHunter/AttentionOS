@@ -118,7 +118,7 @@
 
 .tracking-card {
   display: grid;
-  grid-template-columns: auto minmax(220px, 0.8fr) minmax(260px, 1fr) auto auto;
+  grid-template-columns: auto minmax(260px, 1fr) auto auto auto;
   gap: 12px;
   align-items: end;
   margin-bottom: 16px;
@@ -159,8 +159,7 @@
   font-weight: 700;
 }
 
-.task-select select,
-.task-add input {
+.task-select select {
   min-height: 38px;
   border: 1px solid var(--border);
   border-radius: 10px;
@@ -169,8 +168,33 @@
   padding: 8px 10px;
 }
 
-.task-add {
-  align-self: end;
+.button.rest {
+  background: var(--accent-soft);
+  border-color: color-mix(in srgb, var(--accent) 36%, var(--border));
+  color: var(--accent);
+  font-weight: 700;
+}
+
+.break-inline {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  min-height: 38px;
+  padding: 6px 8px 6px 12px;
+  border: 1px solid color-mix(in srgb, var(--accent) 36%, var(--border));
+  border-radius: 12px;
+  background: var(--accent-soft);
+}
+
+.break-inline span {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.break-inline strong {
+  color: var(--text);
+  font-size: 14px;
 }
 
 .state-card,

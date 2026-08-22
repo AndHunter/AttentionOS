@@ -6,7 +6,7 @@ import json
 import sqlite3
 import sys
 from dataclasses import asdict, dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import numpy as np
@@ -14,7 +14,6 @@ import pandas as pd
 
 from attentionos.config import get_config
 from attentionos.ml.demo.features import build_features_at, feature_schema, real_events_to_frame
-
 
 DEFAULT_MIN_SAMPLES = 5
 MAX_TRAINING_REPORTS = 20
@@ -67,7 +66,11 @@ def train_personal_effectiveness(
 
     from catboost import CatBoostRegressor, Pool
 
-    cat_features = [features.index(name) for name in feature_schema().categorical if name in features]
+    cat_features = [
+        features.index(name)
+        for name in feature_schema().categorical
+        if name in features
+    ]
     model = CatBoostRegressor(
         iterations=120,
         depth=4,
@@ -119,7 +122,8 @@ def _build_rows(db_path: Path) -> list[dict[str, object]]:
     conn.row_factory = sqlite3.Row
     try:
         report_rows = conn.execute(
-            "SELECT id, timestamp, perceived_effectiveness, perceived_fatigue, task_difficulty, task_name "
+            "SELECT id, timestamp, perceived_effectiveness, perceived_fatigue, "
+            "task_difficulty, task_name "
             "FROM self_reports ORDER BY timestamp DESC LIMIT ?1",
             (MAX_TRAINING_REPORTS,),
         ).fetchall()
@@ -129,7 +133,9 @@ def _build_rows(db_path: Path) -> list[dict[str, object]]:
         latest_report = datetime.fromisoformat(str(report_rows[-1]["timestamp"]))
         report_cutoff = latest_report - timedelta(days=MAX_TRAINING_DAYS)
         report_rows = [
-            row for row in report_rows if datetime.fromisoformat(str(row["timestamp"])) >= report_cutoff
+            row
+            for row in report_rows
+            if datetime.fromisoformat(str(row["timestamp"])) >= report_cutoff
         ]
         if not report_rows:
             return []
@@ -138,7 +144,8 @@ def _build_rows(db_path: Path) -> list[dict[str, object]]:
         )
         event_rows = conn.execute(
             "SELECT * FROM ("
-            "SELECT ts_start, ts_end, process_name, idle_seconds, keyboard_events, mouse_events, task_label "
+            "SELECT ts_start, ts_end, process_name, idle_seconds, keyboard_events, "
+            "mouse_events, task_label "
             "FROM activity_events WHERE ts_start >= ?1 ORDER BY ts_start DESC LIMIT ?2"
             ") ORDER BY ts_start ASC",
             (earliest.isoformat(sep=" "), MAX_TELEMETRY_ROWS),
@@ -176,17 +183,38 @@ def _normalize_task(task: str) -> str:
     value = task.lower()
     mapping = {
         "работа": "work",
+        "учёба": "study",
+        "учеба": "study",
+        "уроки": "study",
+        "домашка": "study",
         "отдых": "rest",
         "игра": "gaming",
         "другое": "other",
         "программирование": "coding",
         "математика": "math",
+        "физика": "science",
+        "химия": "science",
+        "биология": "science",
         "английский": "english",
+        "другой язык": "english",
         "чтение": "reading",
         "письмо": "writing",
+        "исследование": "research",
+        "творчество": "creative",
         "общение": "communication",
+        "админка": "admin",
+        "планирование": "admin",
     }
-    return mapping.get(value, value)
+    normalized = mapping.get(value, value)
+    if normalized in {"school", "homework"}:
+        return "study"
+    if normalized in {"physics", "chemistry", "biology"}:
+        return "science"
+    if normalized in {"language"}:
+        return "english"
+    if normalized in {"planning"}:
+        return "admin"
+    return normalized
 
 
 def _downsample_frame(frame: pd.DataFrame) -> pd.DataFrame:
@@ -233,10 +261,13 @@ def _write_metadata(target_dir: Path, result: PersonalTrainingResult, features: 
     metadata = {
         **asdict(result),
         "features": features,
-        "trained_at_utc": datetime.now(timezone.utc).isoformat(),
+        "trained_at_utc": datetime.now(UTC).isoformat(),
         "source": "real_local_telemetry",
     }
-    (target_dir / "metadata.json").write_text(json.dumps(metadata, indent=2, ensure_ascii=False), encoding="utf-8")
+    (target_dir / "metadata.json").write_text(
+        json.dumps(metadata, indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
 
 
 def main() -> None:

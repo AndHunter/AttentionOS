@@ -6,44 +6,46 @@
     "days": 1,
     "resolution_seconds": 300,
     "step_minutes": 15,
-    "telemetry_rows": 159,
+    "telemetry_rows": 153,
     "reports": 6,
-    "interventions": 10,
-    "training_samples": 50,
-    "created_at": "2026-08-14T23:36:02.857294",
+    "interventions": 17,
+    "training_samples": 48,
+    "created_at": "2026-08-23T00:01:46.897690",
     "note": "Demo model trained on synthetic data. Synthetic metrics are not real-world validation."
   },
   "target_distribution": {
-    "1.0": 8,
-    "2.0": 39,
-    "3.0": 3
+    "1.0": 2,
+    "2.0": 34,
+    "3.0": 12
   },
-  "decline_rate": 0.12,
-  "break_benefit_mean": 0.5459810078895722,
+  "decline_rate": 0.1875,
+  "break_benefit_mean": 0.4630095006994719,
   "archetypes": {
-    "frequent_break_worker": 80,
-    "high_endurance": 79
+    "high_endurance": 79,
+    "frequent_break_worker": 74
   },
   "tasks": {
-    "ml": 39,
-    "coding": 37,
-    "reading": 34,
-    "other": 21,
-    "math": 17,
-    "communication": 6,
-    "writing": 5
+    "study": 40,
+    "work": 28,
+    "other": 17,
+    "creative": 16,
+    "coding": 15,
+    "reading": 11,
+    "communication": 8,
+    "math": 7,
+    "science": 5,
+    "english": 5,
+    "gaming": 1
   },
   "reports_per_user_mean": 3.0,
   "hour_distribution": {
-    "6": 7,
-    "7": 12,
     "8": 12,
     "9": 20,
     "10": 24,
     "11": 24,
     "12": 24,
-    "13": 13,
-    "14": 12,
+    "13": 24,
+    "14": 14,
     "15": 11
   }
 }

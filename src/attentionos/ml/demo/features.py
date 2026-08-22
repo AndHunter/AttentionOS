@@ -10,7 +10,6 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-
 WINDOWS = (1, 5, 15, 30, 60, 120)
 CATEGORICAL_FEATURES = ["task_category"]
 
@@ -83,7 +82,15 @@ def feature_schema() -> FeatureSchema:
                 f"unique_apps_{window}m",
             ]
         )
-    numeric.extend(["app_entropy_5m", "app_entropy_15m", "app_entropy_30m", "app_entropy_60m", "app_entropy_120m"])
+    numeric.extend(
+        [
+            "app_entropy_5m",
+            "app_entropy_15m",
+            "app_entropy_30m",
+            "app_entropy_60m",
+            "app_entropy_120m",
+        ]
+    )
     return FeatureSchema(numeric=numeric, categorical=CATEGORICAL_FEATURES.copy())
 
 
@@ -94,7 +101,7 @@ def build_training_windows(telemetry: pd.DataFrame, step_minutes: int = 5) -> pd
     telemetry = telemetry.sort_values(["user_id", "timestamp"]).copy()
     telemetry["timestamp"] = pd.to_datetime(telemetry["timestamp"])
     rows: list[dict[str, object]] = []
-    for (_user, day), group in telemetry.groupby(["user_id", "day"], sort=False):
+    for (_user, _day), group in telemetry.groupby(["user_id", "day"], sort=False):
         group = group.reset_index(drop=True)
         start = group["timestamp"].min() + timedelta(minutes=30)
         end = group["timestamp"].max()
@@ -148,8 +155,13 @@ def build_features_at(events: pd.DataFrame, at_time: datetime | pd.Timestamp) ->
     row["break_count_today"] = len(breaks)
     row["total_break_time_today"] = float(sum(breaks))
     row["last_break_duration"] = float(breaks[-1]) if breaks else 0.0
-    row["task_duration"] = _current_task_minutes(causal, str(latest.get("task_category", "other")))
-    row["task_switches_today"] = int((causal["task_category"] != causal["task_category"].shift()).sum() - 1)
+    row["task_duration"] = _current_task_minutes(
+        causal,
+        str(latest.get("task_category", "other")),
+    )
+    row["task_switches_today"] = int(
+        (causal["task_category"] != causal["task_category"].shift()).sum() - 1
+    )
     row["minutes_since_wake_proxy"] = elapsed
 
     for window in WINDOWS:
@@ -178,7 +190,10 @@ def build_features_at(events: pd.DataFrame, at_time: datetime | pd.Timestamp) ->
     input_rate = row["keyboard_rate_30m"] + row["mouse_rate_30m"]
     row["switch_rate_vs_baseline"] = _ratio(row["switch_rate_30m"], baseline["switch_rate"])
     row["input_rate_vs_baseline"] = _ratio(input_rate, baseline["input_rate"])
-    row["session_duration_vs_baseline"] = _ratio(row["current_session_duration"], baseline["session"])
+    row["session_duration_vs_baseline"] = _ratio(
+        row["current_session_duration"],
+        baseline["session"],
+    )
     row["active_ratio_vs_baseline"] = _ratio(row["active_ratio_30m"], baseline["active_ratio"])
     return row
 
@@ -186,26 +201,42 @@ def build_features_at(events: pd.DataFrame, at_time: datetime | pd.Timestamp) ->
 def real_events_to_frame(events: list[dict[str, object]]) -> pd.DataFrame:
     """Convert SQLite activity rows to the feature-builder event shape."""
     rows = []
+    idle_threshold_seconds = _runtime_idle_threshold_seconds()
     for event in events:
         ts = _to_local_timestamp(event["ts_start"])
         process = str(event.get("process_name") or "unknown").lower()
         task = str(event.get("task_label") or "other").lower()
+        idle_seconds = float(event.get("idle_seconds") or 0)
+        input_events = int(event.get("keyboard_events") or 0) + int(event.get("mouse_events") or 0)
+        is_active = input_events > 0 or idle_seconds < idle_threshold_seconds
+        task_category = _task_category(task)
         rows.append(
             {
                 "user_id": "real",
                 "day": ts.date().isoformat(),
                 "timestamp": ts,
                 "app": process,
-                "task_category": _task_category(task),
+                "task_category": task_category,
                 "difficulty": 3.0,
-                "active": 1 if float(event.get("idle_seconds") or 0) < 120 else 0,
-                "idle": 1 if float(event.get("idle_seconds") or 0) >= 120 else 0,
+                "active": 1 if is_active else 0,
+                "idle": 0 if is_active else 1,
                 "keyboard_events": int(event.get("keyboard_events") or 0),
                 "mouse_events": int(event.get("mouse_events") or 0),
-                "is_distraction": 1 if _task_category(task) in {"gaming", "rest"} else 0,
+                "is_distraction": 1 if task_category in {"gaming", "rest"} else 0,
             }
         )
     return pd.DataFrame(rows)
+
+
+def _runtime_idle_threshold_seconds() -> float:
+    try:
+        from attentionos.config import get_config
+        from attentionos.settings import SettingsStore
+
+        settings = SettingsStore(get_config().data_dir / "settings.json").load()
+        return float(settings.tracking.idle_threshold_minutes * 60)
+    except Exception:
+        return 120.0
 
 
 def _to_local_timestamp(value: object) -> pd.Timestamp:
@@ -253,7 +284,15 @@ def _window(df: pd.DataFrame, at: datetime, minutes: int) -> pd.DataFrame:
 def _add_window(row: dict[str, object], df: pd.DataFrame, minutes: int) -> None:
     denom = max(minutes, 1)
     if df.empty:
-        for key in ["active_ratio", "idle_ratio", "switch_count", "switch_rate", "keyboard_rate", "mouse_rate", "unique_apps"]:
+        for key in [
+            "active_ratio",
+            "idle_ratio",
+            "switch_count",
+            "switch_rate",
+            "keyboard_rate",
+            "mouse_rate",
+            "unique_apps",
+        ]:
             row[f"{key}_{minutes}m"] = 0.0
         if minutes in (5, 15, 30, 60, 120):
             row[f"app_entropy_{minutes}m"] = 0.0
@@ -403,8 +442,11 @@ def _slope_rates(df: pd.DataFrame, at: datetime, minutes: int, kind: str) -> flo
 def _baseline(df: pd.DataFrame) -> dict[str, float]:
     recent = df.tail(min(len(df), 240))
     return {
-        "switch_rate": float(max((recent["app"] != recent["app"].shift()).sum() - 1, 0) / max(len(recent), 1)),
-        "input_rate": float((recent["keyboard_events"].median() + recent["mouse_events"].median())),
+        "switch_rate": float(
+            max((recent["app"] != recent["app"].shift()).sum() - 1, 0)
+            / max(len(recent), 1)
+        ),
+        "input_rate": float(recent["keyboard_events"].median() + recent["mouse_events"].median()),
         "session": max(_current_session_minutes(recent), 1.0),
         "active_ratio": float(max(recent["active"].median(), 0.01)),
     }
@@ -418,6 +460,8 @@ def _task_category(task: str) -> str:
     task = task.lower()
     if task in {"work", "работа"}:
         return "work"
+    if task in {"study", "school", "homework", "учёба", "учеба", "уроки", "домашка"}:
+        return "study"
     if task in {"coding", "code", "программирование"}:
         return "coding"
     if task in {"rest", "отдых"}:
@@ -428,18 +472,36 @@ def _task_category(task: str) -> str:
         return "reading"
     if task in {"writing", "письмо"}:
         return "writing"
+    if task in {"research", "исследование"}:
+        return "research"
+    if task in {"creative", "творчество"}:
+        return "creative"
+    if task in {"admin", "planning", "админка", "планирование"}:
+        return "admin"
     if task in {"communication", "общение"}:
         return "communication"
     if task in {"other", "другое", "none"}:
         return "other"
+    if task in {"physics", "chemistry", "biology", "science", "физика", "химия", "биология"}:
+        return "science"
     if "ml" in task:
         return "ml"
+    if "study" in task or "school" in task or "homework" in task or "урок" in task:
+        return "study"
     if "math" in task:
         return "math"
-    if "english" in task or "англий" in task:
+    if "physics" in task or "chemistry" in task or "biology" in task or "science" in task:
+        return "science"
+    if "english" in task or "language" in task or "англий" in task:
         return "english"
     if "read" in task or "чтен" in task:
         return "reading"
+    if "research" in task:
+        return "research"
+    if "creative" in task:
+        return "creative"
+    if "admin" in task or "planning" in task:
+        return "admin"
     if "meeting" in task or "telegram" in task:
         return "communication"
     if "code" in task or "coding" in task:

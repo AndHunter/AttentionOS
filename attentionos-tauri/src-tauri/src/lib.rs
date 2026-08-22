@@ -255,7 +255,12 @@ fn get_dashboard(date: Option<String>) -> Result<DashboardPayload, String> {
             )
         })
         .collect::<Vec<_>>();
-    Ok(build_dashboard(target, db_path, events))
+    Ok(build_dashboard(
+        target,
+        db_path,
+        events,
+        (settings.tracking.idle_threshold_minutes * 60) as f64,
+    ))
 }
 
 #[tauri::command]
@@ -809,6 +814,12 @@ fn start_break(minutes: Option<i64>) -> Result<BreakStatePayload, String> {
     let until = now + chrono::Duration::minutes(planned);
     let prediction_before_id = latest_prediction_id(&conn);
     let task_before = current_task_label();
+    set_runtime_value(
+        &conn,
+        "pre_break_task_label",
+        task_before.as_deref().unwrap_or("None"),
+    )?;
+    set_current_task_label_value("rest")?;
     conn.execute(
         "INSERT INTO app_runtime_state (key, value) VALUES (?1, ?2) \
          ON CONFLICT(key) DO UPDATE SET value=excluded.value",
@@ -903,7 +914,15 @@ fn complete_break_in_conn(
         .unwrap_or(0);
     let recommendation_id = latest_started_recommendation_id(conn);
     let prediction_after_id = latest_prediction_id(conn);
-    let task_after = current_task_label();
+    let restored_task = runtime_value(conn, "pre_break_task_label")
+        .filter(|value| {
+            let trimmed = value.trim();
+            !trimmed.is_empty()
+                && !trimmed.eq_ignore_ascii_case("none")
+                && !trimmed.eq_ignore_ascii_case("rest")
+        })
+        .unwrap_or_else(|| "work".to_string());
+    let task_after = Some(restored_task.clone());
     conn.execute(
         "UPDATE recommendations SET completed_at = ?1, actual_duration = ?2, prediction_after_id = ?3, task_after = ?4 \
          WHERE id = (SELECT id FROM recommendations WHERE started_at IS NOT NULL AND completed_at IS NULL ORDER BY id DESC LIMIT 1)",
@@ -916,6 +935,8 @@ fn complete_break_in_conn(
     set_runtime_value(conn, "break_state", "READY_TO_WORK")?;
     set_runtime_value(conn, "last_meaningful_break_at", &now.to_string())?;
     set_runtime_value(conn, "current_work_episode_started_at", &now.to_string())?;
+    set_runtime_value(conn, "pre_break_task_label", "")?;
+    set_current_task_label_value(&restored_task)?;
     Ok(())
 }
 
@@ -962,14 +983,25 @@ fn get_settings() -> Result<RuntimeSettingsPayload, String> {
 
 #[tauri::command]
 fn save_settings(app: AppHandle, settings: RuntimeSettingsPayload) -> Result<(), String> {
+    write_runtime_settings(&settings)?;
+    apply_startup_setting(&app, settings.preferences.launch_on_startup)?;
+    Ok(())
+}
+
+fn write_runtime_settings(settings: &RuntimeSettingsPayload) -> Result<(), String> {
     let path = attentionos_settings_path()?;
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|err| err.to_string())?;
     }
     let raw = serde_json::to_string_pretty(&settings).map_err(|err| err.to_string())?;
     std::fs::write(path, raw).map_err(|err| err.to_string())?;
-    apply_startup_setting(&app, settings.preferences.launch_on_startup)?;
     Ok(())
+}
+
+fn set_current_task_label_value(label: &str) -> Result<(), String> {
+    let mut settings = load_runtime_settings();
+    settings.preferences.current_task_label = label.to_string();
+    write_runtime_settings(&settings)
 }
 
 #[tauri::command]
@@ -1215,7 +1247,7 @@ fn latest_started_recommendation_id(conn: &Connection) -> Option<i64> {
 
 fn current_task_label() -> Option<String> {
     let task = load_runtime_settings().preferences.current_task_label;
-    if task == "None" {
+    if task.trim().is_empty() || task.eq_ignore_ascii_case("none") {
         None
     } else {
         Some(task)
@@ -1308,13 +1340,14 @@ fn recommendation_break_quality(conn: &Connection, recommendation_id: i64) -> (f
     let Some((Some(started_at), Some(completed_at), planned_duration)) = row else {
         return (0.0, 0.0, 0.0, 0.0);
     };
+    let idle_threshold_seconds = (load_runtime_settings().tracking.idle_threshold_minutes * 60) as f64;
     let result = conn.query_row(
         "SELECT \
-         COALESCE(SUM(CASE WHEN COALESCE(idle_seconds, 0) < 120 THEN MAX((julianday(ts_end) - julianday(ts_start)) * 1440.0, 0) ELSE 0 END), 0), \
-         COALESCE(SUM(CASE WHEN COALESCE(idle_seconds, 0) >= 120 THEN MAX((julianday(ts_end) - julianday(ts_start)) * 1440.0, 0) ELSE 0 END), 0), \
+         COALESCE(SUM(CASE WHEN COALESCE(idle_seconds, 0) < ?3 THEN MAX((julianday(ts_end) - julianday(ts_start)) * 1440.0, 0) ELSE 0 END), 0), \
+         COALESCE(SUM(CASE WHEN COALESCE(idle_seconds, 0) >= ?3 THEN MAX((julianday(ts_end) - julianday(ts_start)) * 1440.0, 0) ELSE 0 END), 0), \
          COALESCE(SUM(CASE WHEN lower(COALESCE(task_label, '')) IN ('rest', 'отдых') THEN MAX((julianday(ts_end) - julianday(ts_start)) * 1440.0, 0) ELSE 0 END), 0) \
          FROM activity_events WHERE ts_start < ?2 AND ts_end > ?1",
-        params![started_at, completed_at],
+        params![started_at, completed_at, idle_threshold_seconds],
         |row| Ok((row.get::<_, f64>(0)?, row.get::<_, f64>(1)?, row.get::<_, f64>(2)?)),
     );
     let Ok((active, idle, rest_task)) = result else {
@@ -1717,7 +1750,12 @@ fn load_events_for_day(conn: &Connection, date: &str) -> Result<Vec<EventRow>, S
         .map_err(|err| err.to_string())
 }
 
-fn build_dashboard(date: String, db_path: PathBuf, events: Vec<EventRow>) -> DashboardPayload {
+fn build_dashboard(
+    date: String,
+    db_path: PathBuf,
+    events: Vec<EventRow>,
+    idle_threshold_seconds: f64,
+) -> DashboardPayload {
     let (state_history, daily_summary_from_db) = Connection::open(&db_path)
         .ok()
         .map(|conn| {
@@ -1731,18 +1769,18 @@ fn build_dashboard(date: String, db_path: PathBuf, events: Vec<EventRow>) -> Das
     let event_count = events.len() as i64;
     let active_seconds = timed_events
         .iter()
-        .filter(|item| is_active_event(item.event))
+        .filter(|item| is_active_event(item.event, idle_threshold_seconds))
         .map(|item| item.duration_seconds)
         .sum::<i64>();
     let focused_seconds = timed_events
         .iter()
-        .filter(|item| is_active_event(item.event))
+        .filter(|item| is_focus_event(item.event, idle_threshold_seconds))
         .map(|item| item.duration_seconds)
         .sum::<i64>();
     let context_switches = count_switches(&events);
-    let top_apps = top_apps(&timed_events, active_seconds);
-    let timeline = timeline_segments(&timed_events);
-    let recent_sessions = recent_sessions(&timed_events);
+    let top_apps = top_apps(&timed_events, active_seconds, idle_threshold_seconds);
+    let timeline = timeline_segments(&timed_events, idle_threshold_seconds);
+    let recent_sessions = recent_sessions(&timed_events, idle_threshold_seconds);
 
     let focused_minutes = active_seconds_to_minutes(focused_seconds);
     let active_minutes = active_seconds_to_minutes(active_seconds);
@@ -1791,12 +1829,12 @@ fn build_dashboard(date: String, db_path: PathBuf, events: Vec<EventRow>) -> Das
             Metric {
                 label: "Focused time".to_string(),
                 value: format_minutes(focused_minutes),
-                detail: "Non-idle time for the selected task".to_string(),
+                detail: "Active time inside productive selected task categories".to_string(),
             },
             Metric {
                 label: "Active time".to_string(),
                 value: format_minutes(active_minutes),
-                detail: "Keyboard, mouse, and foreground activity".to_string(),
+                detail: "All non-idle keyboard, mouse, and foreground activity".to_string(),
             },
             Metric {
                 label: "Context switches".to_string(),
@@ -1896,8 +1934,24 @@ fn clean_app_name(name: &str) -> String {
         .to_string()
 }
 
-fn is_active_event(event: &EventRow) -> bool {
-    event.keyboard_events > 0 || event.mouse_events > 0 || event.idle_seconds < 120.0
+fn is_active_event(event: &EventRow, idle_threshold_seconds: f64) -> bool {
+    event.keyboard_events > 0 || event.mouse_events > 0 || event.idle_seconds < idle_threshold_seconds
+}
+
+fn is_focus_event(event: &EventRow, idle_threshold_seconds: f64) -> bool {
+    is_active_event(event, idle_threshold_seconds) && is_productive_task(event.task_label.as_deref())
+}
+
+fn is_productive_task(task: Option<&str>) -> bool {
+    let Some(task) = task else {
+        return false;
+    };
+    let normalized = task.trim().to_lowercase();
+    !normalized.is_empty()
+        && !matches!(
+            normalized.as_str(),
+            "none" | "other" | "rest" | "gaming" | "game" | "другое" | "отдых" | "игра"
+        )
 }
 
 fn count_switches(events: &[EventRow]) -> i64 {
@@ -1907,9 +1961,16 @@ fn count_switches(events: &[EventRow]) -> i64 {
         .count() as i64
 }
 
-fn top_apps(events: &[TimedEvent<'_>], active_seconds: i64) -> Vec<AppUsage> {
+fn top_apps(
+    events: &[TimedEvent<'_>],
+    active_seconds: i64,
+    idle_threshold_seconds: f64,
+) -> Vec<AppUsage> {
     let mut totals = BTreeMap::<String, i64>::new();
-    for item in events.iter().filter(|item| is_active_event(item.event)) {
+    for item in events
+        .iter()
+        .filter(|item| is_active_event(item.event, idle_threshold_seconds))
+    {
         *totals
             .entry(clean_app_name(&item.event.process_name))
             .or_default() += item.duration_seconds;
@@ -1931,12 +1992,15 @@ fn top_apps(events: &[TimedEvent<'_>], active_seconds: i64) -> Vec<AppUsage> {
     rows
 }
 
-fn timeline_segments(events: &[TimedEvent<'_>]) -> Vec<TimelineSegment> {
+fn timeline_segments(
+    events: &[TimedEvent<'_>],
+    idle_threshold_seconds: f64,
+) -> Vec<TimelineSegment> {
     let mut segments: Vec<TimelineSegment> = Vec::new();
     for item in events {
         let start = item.start_minute;
         let end = item.end_minute;
-        let is_idle = !is_active_event(item.event);
+        let is_idle = !is_active_event(item.event, idle_threshold_seconds);
         let app = if is_idle {
             "Idle".to_string()
         } else {
@@ -1965,13 +2029,19 @@ fn timeline_segments(events: &[TimedEvent<'_>]) -> Vec<TimelineSegment> {
     segments
 }
 
-fn recent_sessions(events: &[TimedEvent<'_>]) -> Vec<RecentSession> {
+fn recent_sessions(
+    events: &[TimedEvent<'_>],
+    idle_threshold_seconds: f64,
+) -> Vec<RecentSession> {
     let mut blocks: Vec<RecentSession> = Vec::new();
     let mut current_start = 0;
     let mut current_end = 0;
     let mut current_task: Option<String> = None;
     let mut apps = BTreeMap::<String, bool>::new();
-    for item in events.iter().filter(|item| is_active_event(item.event)) {
+    for item in events
+        .iter()
+        .filter(|item| is_active_event(item.event, idle_threshold_seconds))
+    {
         let task = item.event.task_label.clone();
         let gap = if current_end == 0 { 0 } else { item.start_minute - current_end };
         let should_split = current_end == 0 || current_task != task || gap > 10;
