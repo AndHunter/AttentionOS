@@ -44,6 +44,10 @@ def recommend_action(
     switch_rate_delta_5_30: float = 0.0,
     idle_ratio_delta_5_30: float = 0.0,
     session_duration_vs_baseline: float = 1.0,
+    break_count_today: float = 0.0,
+    last_break_duration: float = 0.0,
+    active_ratio_15m: float = 1.0,
+    idle_ratio_15m: float = 0.0,
 ) -> DemoRecommendation:
     """Choose WORK/BREAK using current model estimates and conservative guardrails."""
     effectiveness_100 = _effectiveness_to_100(current_effectiveness)
@@ -53,16 +57,33 @@ def recommend_action(
         idle_ratio_delta_5_30=idle_ratio_delta_5_30,
         session_duration_vs_baseline=session_duration_vs_baseline,
     )
+    first_break_pressure = 1.0 if break_count_today <= 0 and continuous_work_minutes >= 60 else 0.0
+    rest_debt = min(max((time_since_last_break - 50) / 90, 0), 1)
+    weak_recent_activity = 1.0 if continuous_work_minutes >= 45 and active_ratio_15m < 0.55 else 0.0
+    incomplete_recovery = 1.0 if 0 < last_break_duration < MEANINGFUL_BREAK_MINUTES else 0.0
     continue_utility = (
         effectiveness_100
         - decline_60m * 34
         - max(continuous_work_minutes - 60, 0) * 0.07
         - trend_pressure * 8
+        - first_break_pressure * 6
+        - rest_debt * 6
+        - weak_recent_activity * 5
+        - incomplete_recovery * 5
     )
     utilities: dict[str, float] = {"CONTINUE": round(continue_utility, 3)}
     fatigue_pressure = min(max(continuous_work_minutes / 150, 0), 1.4)
     for minutes in BREAK_CANDIDATES:
-        recovery = (raw_break_benefit * 24) + (decline_60m * 13) + (fatigue_pressure * 10)
+        recovery = (
+            (raw_break_benefit * 24)
+            + (decline_60m * 13)
+            + (fatigue_pressure * 10)
+            + (first_break_pressure * 6)
+            + (rest_debt * 8)
+            + (weak_recent_activity * 5)
+            + (incomplete_recovery * 5)
+            + max(idle_ratio_15m - 0.18, 0) * 8
+        )
         duration_fit = 8 - abs(minutes - _preferred_break_minutes(continuous_work_minutes, decline_60m)) * 0.35
         excessive_break_penalty = max(minutes - 20, 0) * 0.32
         utilities[f"BREAK_{minutes}"] = round(effectiveness_100 + recovery + duration_fit - excessive_break_penalty, 3)
@@ -110,9 +131,35 @@ def recommend_action(
         )
 
     if (
+        continuous_work_minutes >= 60
+        and first_break_pressure > 0
+        and (decline_30m >= 0.42 or model_break_benefit >= 5.2 or trend_pressure >= 0.35 or weak_recent_activity > 0)
+    ):
+        minutes = int(best_break_action.split("_")[1])
+        return _break_result(
+            best_break_action,
+            minutes,
+            "First break suggested",
+            "first_break_guard: no meaningful break has been observed today and fatigue signals are rising.",
+            max(decline_30m, raw_break_benefit, 0.58),
+            max(model_break_benefit, 5.2),
+            continue_utility,
+            best_break_utility,
+            utilities,
+            "MODEL",
+        )
+
+    if (
         continuous_work_minutes >= 45
         and model_break_benefit >= 7.0
         and best_break_utility - continue_utility >= 18
+        and (
+            decline_30m >= 0.45
+            or trend_pressure >= 0.35
+            or switch_rate_delta_5_30 >= 0.45
+            or input_rate_delta_5_30 <= -0.2
+            or weak_recent_activity > 0
+        )
     ):
         minutes = int(best_break_action.split("_")[1])
         return _break_result(
@@ -159,6 +206,10 @@ def recommend_action(
             utilities,
         )
 
+    display_break_benefit = model_break_benefit
+    if decline_30m < 0.45 and trend_pressure < 0.35 and weak_recent_activity == 0:
+        display_break_benefit = min(display_break_benefit, 4.9)
+
     return DemoRecommendation(
         "CONTINUE",
         "WORK",
@@ -166,7 +217,7 @@ def recommend_action(
         "decline risk is not high enough and break utility does not beat continuing.",
         max(0.0, 1.0 - decline_30m),
         None,
-        model_break_benefit,
+        display_break_benefit,
         next_eta,
         "MODEL",
         round(continue_utility, 3),

@@ -281,7 +281,7 @@ def _current_session_minutes(df: pd.DataFrame) -> float:
     rev = df.iloc[::-1]
     count = 0
     for _, row in rev.iterrows():
-        if row["app"] != latest_app or row["idle"] > 0:
+        if row["app"] != latest_app or row["idle"] > 0 or _is_rest_task(row):
             break
         count += 1
     return count * _resolution_minutes(df)
@@ -291,7 +291,7 @@ def _continuous_work_minutes(df: pd.DataFrame) -> float:
     rev = df.iloc[::-1]
     count = 0
     for _, row in rev.iterrows():
-        if row["idle"] > 0:
+        if row["idle"] > 0 or _is_rest_task(row):
             break
         count += 1
     return count * _resolution_minutes(df)
@@ -301,7 +301,7 @@ def _time_since_last_break(df: pd.DataFrame) -> float:
     rev = df.iloc[::-1]
     count = 0
     for _, row in rev.iterrows():
-        if row["idle"] > 0:
+        if row["idle"] > 0 or _is_rest_task(row):
             break
         count += 1
     return count * _resolution_minutes(df)
@@ -315,7 +315,7 @@ def _current_work_episode(df: pd.DataFrame, min_break_minutes: float = 5.0) -> p
     cutoff_index = -1
     for idx in range(len(df) - 1, -1, -1):
         row = df.iloc[idx]
-        if row["idle"] > 0 or str(row.get("task_category", "")).lower() == "rest":
+        if row["idle"] > 0 or _is_rest_task(row):
             idle_run += res
             if idle_run >= min_break_minutes:
                 cutoff_index = idx
@@ -334,7 +334,7 @@ def _break_durations(df: pd.DataFrame, min_break_minutes: float = 5.0) -> list[f
     breaks: list[float] = []
     current = 0.0
     for _, row in df.iterrows():
-        is_break = row["idle"] > 0 or str(row.get("task_category", "")).lower() == "rest"
+        is_break = row["idle"] > 0 or _is_rest_task(row)
         if is_break:
             current += res
             continue
@@ -344,6 +344,10 @@ def _break_durations(df: pd.DataFrame, min_break_minutes: float = 5.0) -> list[f
     if current >= min_break_minutes:
         breaks.append(current)
     return breaks
+
+
+def _is_rest_task(row: pd.Series) -> bool:
+    return str(row.get("task_category", "")).lower() in {"rest", "отдых"}
 
 
 def _active_since_current_work_start(df: pd.DataFrame) -> float:
@@ -384,7 +388,7 @@ def _slope_rates(df: pd.DataFrame, at: datetime, minutes: int, kind: str) -> flo
     w = _window(df, at, minutes)
     if len(w) < 4:
         return 0.0
-    chunks = np.array_split(w, 4)
+    chunks = [w.loc[indexes] for indexes in np.array_split(w.index.to_numpy(), 4)]
     values = []
     for chunk in chunks:
         if kind == "input":
@@ -432,7 +436,9 @@ def _task_category(task: str) -> str:
         return "ml"
     if "math" in task:
         return "math"
-    if "english" in task or "read" in task:
+    if "english" in task or "англий" in task:
+        return "english"
+    if "read" in task or "чтен" in task:
         return "reading"
     if "meeting" in task or "telegram" in task:
         return "communication"

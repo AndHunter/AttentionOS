@@ -16,6 +16,7 @@ import pandas as pd
 from attentionos.config import get_config
 from attentionos.ml.demo.features import build_features_at, feature_schema, real_events_to_frame
 from attentionos.ml.demo.recommendation_engine import recommend_action
+from attentionos.ml.personal_train import load_personal_effectiveness
 
 
 INFERENCE_INTERVAL_SECONDS = 60
@@ -38,8 +39,9 @@ def run_demo_inference(
         diagnostics["telemetry_available_minutes"] = round(_telemetry_span_minutes(events), 2)
         if not events:
             return _warmup("Нет telemetry за последние 24 часа.", started, diagnostics)
-        frame = real_events_to_frame(events)
-        active_minutes = float(frame["active"].sum() * _resolution_minutes(frame))
+        raw_frame = real_events_to_frame(events)
+        active_minutes = float(raw_frame["active"].sum() * _resolution_minutes(raw_frame))
+        frame = _compact_inference_frame(raw_frame)
         diagnostics["active_minutes"] = round(active_minutes, 2)
         telemetry_minutes = max(active_minutes, float(diagnostics["telemetry_available_minutes"]))
         if telemetry_minutes < min_minutes:
@@ -61,6 +63,17 @@ def run_demo_inference(
         model_features = list(metadata.get("features") or feature_schema().all)
         x = pd.DataFrame([{name: row.get(name, 0.0) for name in model_features}])
         current_effectiveness_raw = float(np.clip(eff.predict(x)[0], 1, 5))
+        personal = _predict_personal_effectiveness(row)
+        if personal is not None:
+            personal_raw, personal_weight, personal_version = personal
+            current_effectiveness_raw = float(
+                np.clip(current_effectiveness_raw * (1 - personal_weight) + personal_raw * personal_weight, 1, 5)
+            )
+            diagnostics["personal_model_loaded"] = True
+            diagnostics["personal_model_version"] = personal_version
+            diagnostics["personal_model_weight"] = round(personal_weight, 3)
+        else:
+            diagnostics["personal_model_loaded"] = False
         effectiveness = _effectiveness_to_100(current_effectiveness_raw)
         decline_base = float(np.clip(decline.predict_proba(x)[0][1], 0, 1))
         trend_pressure = _trend_pressure(row)
@@ -83,6 +96,10 @@ def run_demo_inference(
             switch_rate_delta_5_30=float(row["switch_rate_delta_5_30"]),
             idle_ratio_delta_5_30=float(row["idle_ratio_delta_5_30"]),
             session_duration_vs_baseline=float(row["session_duration_vs_baseline"]),
+            break_count_today=float(row["break_count_today"]),
+            last_break_duration=float(row["last_break_duration"]),
+            active_ratio_15m=float(row["active_ratio_15m"]),
+            idle_ratio_15m=float(row["idle_ratio_15m"]),
         )
         tracking_started_at = _tracking_started_at(db)
         tracking_elapsed = _tracking_elapsed_minutes(tracking_started_at, now_local)
@@ -182,6 +199,19 @@ def _load_models(model_dir: Path | None):
     return metadata, eff, decline, benefit
 
 
+def _predict_personal_effectiveness(row: dict[str, object]) -> tuple[float, float, str] | None:
+    personal = load_personal_effectiveness()
+    if personal is None:
+        return None
+    metadata, model = personal
+    features = list(metadata.get("features") or feature_schema().all)
+    x = pd.DataFrame([{name: row.get(name, 0.0) for name in features}])
+    samples = int(metadata.get("samples") or 0)
+    weight = float(np.clip(samples / 80, 0.08, 0.35))
+    prediction = float(np.clip(model.predict(x)[0], 1, 5))
+    return prediction, weight, str(metadata.get("model_version") or "personal-effectiveness-v1")
+
+
 def _load_recent_events(db_path: Path, now_local: datetime) -> list[dict[str, object]]:
     if not db_path.exists():
         return []
@@ -196,6 +226,41 @@ def _load_recent_events(db_path: Path, now_local: datetime) -> list[dict[str, ob
     ).fetchall()
     conn.close()
     return [dict(row) for row in rows]
+
+
+def _compact_inference_frame(frame: pd.DataFrame) -> pd.DataFrame:
+    if len(frame) <= 4_000:
+        return frame
+    data = frame.copy()
+    data["timestamp"] = pd.to_datetime(data["timestamp"])
+    cutoff = data["timestamp"].max() - pd.Timedelta(minutes=30)
+    recent = data[data["timestamp"] >= cutoff]
+    old = data[data["timestamp"] < cutoff]
+    if old.empty:
+        return data
+    old_agg = (
+        old.sort_values("timestamp")
+        .set_index("timestamp")
+        .resample("1min")
+        .agg(
+            {
+                "user_id": "last",
+                "day": "last",
+                "app": "last",
+                "task_category": "last",
+                "difficulty": "mean",
+                "active": "max",
+                "idle": "max",
+                "keyboard_events": "sum",
+                "mouse_events": "sum",
+                "is_distraction": "max",
+            }
+        )
+        .dropna(subset=["app"])
+        .reset_index()
+    )
+    old_agg["day"] = old_agg["timestamp"].dt.date.astype(str)
+    return pd.concat([old_agg, recent], ignore_index=True).sort_values("timestamp").reset_index(drop=True)
 
 
 def _persist_prediction(db_path: Path, result: dict[str, object], now_local: datetime) -> None:
@@ -219,6 +284,7 @@ def _persist_prediction(db_path: Path, result: dict[str, object], now_local: dat
             result.get("state") == "WORK"
             and previous_action.startswith("BREAK")
             and result.get("recommended_action") == "CONTINUE"
+            and not _notification_in_cooldown(conn, "ml_ready_to_work", now_utc, max(5, cooldown_minutes))
         )
         conn.execute(
             "INSERT INTO ml_predictions ("
@@ -259,7 +325,6 @@ def _persist_prediction(db_path: Path, result: dict[str, object], now_local: dat
                 "VALUES (?1, 'AttentionOS', ?2, 'unread', NULL, 'ml_break_recommendation', ?3)",
                 (now_utc, body, json.dumps({"source": "demo_ml", "prediction": result.get("recommended_action")})),
             )
-            _show_windows_notification("AttentionOS", body)
         elif should_notify_work:
             body = "Можно возвращаться к работе. Перерыв завершён, состояние переоценено."
             conn.execute(
@@ -267,7 +332,6 @@ def _persist_prediction(db_path: Path, result: dict[str, object], now_local: dat
                 "VALUES (?1, 'AttentionOS', ?2, 'unread', NULL, 'ml_ready_to_work', ?3)",
                 (now_utc, body, json.dumps({"source": "demo_ml", "prediction": result.get("recommended_action")})),
             )
-            _show_windows_notification("AttentionOS", body)
         conn.commit()
     finally:
         conn.close()
@@ -296,7 +360,8 @@ def _ensure_ml_tables(conn: sqlite3.Connection) -> None:
         "action TEXT, accepted INTEGER DEFAULT 0, ignored INTEGER DEFAULT 0, planned_duration INTEGER, "
         "actual_duration REAL, prediction_before_id INTEGER, prediction_after_id INTEGER, "
         "effectiveness_before REAL, effectiveness_after REAL, decline_30m_before REAL, decline_30m_after REAL, "
-        "task_before TEXT, task_after TEXT)"
+        "task_before TEXT, task_after TEXT, active_minutes_during_break REAL, idle_minutes_during_break REAL, "
+        "rest_task_minutes_during_break REAL, restful_break_score REAL)"
     )
     conn.execute(
         "CREATE TABLE IF NOT EXISTS notifications ("
@@ -311,6 +376,10 @@ def _ensure_ml_tables(conn: sqlite3.Connection) -> None:
     _ensure_column(conn, "recommendations", "prediction_after_id", "INTEGER")
     _ensure_column(conn, "recommendations", "task_before", "TEXT")
     _ensure_column(conn, "recommendations", "task_after", "TEXT")
+    _ensure_column(conn, "recommendation_outcomes", "active_minutes_during_break", "REAL")
+    _ensure_column(conn, "recommendation_outcomes", "idle_minutes_during_break", "REAL")
+    _ensure_column(conn, "recommendation_outcomes", "rest_task_minutes_during_break", "REAL")
+    _ensure_column(conn, "recommendation_outcomes", "restful_break_score", "REAL")
 
 
 def _ensure_column(conn: sqlite3.Connection, table: str, column: str, definition: str) -> None:
@@ -333,12 +402,21 @@ def _break_notification_in_cooldown(
     now_utc: str,
     cooldown_minutes: int,
 ) -> bool:
+    return _notification_in_cooldown(conn, "ml_break_recommendation", now_utc, cooldown_minutes)
+
+
+def _notification_in_cooldown(
+    conn: sqlite3.Connection,
+    kind: str,
+    now_utc: str,
+    cooldown_minutes: int,
+) -> bool:
     since = datetime.fromisoformat(now_utc).replace(tzinfo=timezone.utc) - timedelta(minutes=cooldown_minutes)
     row = conn.execute(
         "SELECT 1 FROM notifications "
-        "WHERE kind = 'ml_break_recommendation' AND created_at >= ?1 "
+        "WHERE kind = ?1 AND created_at >= ?2 "
         "ORDER BY id DESC LIMIT 1",
-        (since.replace(tzinfo=None).isoformat(sep=" "),),
+        (kind, since.replace(tzinfo=None).isoformat(sep=" ")),
     ).fetchone()
     return row is not None
 

@@ -13,6 +13,7 @@ use std::time::Duration;
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{AppHandle, Manager};
+use tauri_plugin_notification::NotificationExt;
 use winreg::enums::HKEY_CURRENT_USER;
 use winreg::RegKey;
 
@@ -214,7 +215,7 @@ impl Default for RuntimeSettingsPayload {
                 do_not_disturb_end: "08:00".to_string(),
             },
             model: ModelSettings {
-                min_training_samples: 30,
+                min_training_samples: 5,
             },
         }
     }
@@ -468,6 +469,35 @@ fn run_demo_ml_once() -> Result<serde_json::Value, String> {
     serde_json::from_slice(&output.stdout).map_err(|err| err.to_string())
 }
 
+#[tauri::command]
+fn train_personal_model(min_samples: Option<i64>) -> Result<serde_json::Value, String> {
+    let mut command = python_collector_command()?;
+    let min_samples = min_samples.unwrap_or(5).clamp(3, 500).to_string();
+    command
+        .args([
+            "-m",
+            "attentionos.ml.personal_train",
+            "--min-samples",
+            min_samples.as_str(),
+        ])
+        .stdin(Stdio::null())
+        .stderr(Stdio::from(open_collector_log("personal_ml_stderr.log")?))
+        .env("PYTHONUTF8", "1")
+        .env("PYTHONWARNINGS", "ignore");
+    #[cfg(windows)]
+    command.creation_flags(CREATE_NO_WINDOW);
+    let output = command
+        .output()
+        .map_err(|err| format!("Could not train personal ML model: {err}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "Personal ML training exited with status {}.",
+            output.status
+        ));
+    }
+    serde_json::from_slice(&output.stdout).map_err(|err| err.to_string())
+}
+
 fn column_exists(conn: &Connection, table: &str, column: &str) -> Result<bool, String> {
     let mut stmt = conn
         .prepare(&format!("PRAGMA table_info({table})"))
@@ -510,12 +540,14 @@ fn telemetry_hours(conn: &Connection) -> f64 {
     .unwrap_or(0.0)
 }
 
-fn spawn_demo_ml_scheduler() {
-    thread::spawn(|| {
+fn spawn_demo_ml_scheduler(app: AppHandle) {
+    thread::spawn(move || {
         thread::sleep(Duration::from_secs(20));
         loop {
             if let Err(err) = run_demo_ml_once() {
                 eprintln!("Demo ML scheduler failed: {err}");
+            } else if let Err(err) = deliver_latest_model_notification(&app) {
+                eprintln!("Demo ML notification delivery failed: {err}");
             }
             let settings = load_runtime_settings();
             let interval = settings
@@ -525,6 +557,93 @@ fn spawn_demo_ml_scheduler() {
             thread::sleep(Duration::from_secs(interval));
         }
     });
+}
+
+fn deliver_latest_model_notification(app: &AppHandle) -> Result<(), String> {
+    let db_path = attentionos_db_path()?;
+    if !db_path.exists() {
+        return Ok(());
+    }
+    let conn = Connection::open(db_path).map_err(|err| err.to_string())?;
+    ensure_runtime_state(&conn)?;
+    let last_id = runtime_value(&conn, "last_native_notification_id")
+        .and_then(|value| value.parse::<i64>().ok())
+        .unwrap_or(0);
+    let rows = {
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, title, body FROM notifications \
+                 WHERE state = 'unread' AND kind LIKE 'ml_%' AND id > ?1 \
+                 ORDER BY id ASC LIMIT 5",
+            )
+            .map_err(|err| err.to_string())?;
+        let rows = stmt
+            .query_map(params![last_id], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })
+            .map_err(|err| err.to_string())?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|err| err.to_string())?
+    };
+    for (id, title, body) in rows {
+        show_app_notification(app, &title, &body);
+        set_runtime_value(&conn, "last_native_notification_id", &id.to_string())?;
+    }
+    Ok(())
+}
+
+fn spawn_break_monitor(app: AppHandle) {
+    thread::spawn(move || loop {
+        if let Err(err) = complete_expired_break(&app) {
+            eprintln!("Break monitor failed: {err}");
+        }
+        thread::sleep(Duration::from_secs(10));
+    });
+}
+
+fn complete_expired_break(app: &AppHandle) -> Result<(), String> {
+    let db_path = attentionos_db_path()?;
+    if !db_path.exists() {
+        return Ok(());
+    }
+    let conn = Connection::open(db_path).map_err(|err| err.to_string())?;
+    ensure_runtime_state(&conn)?;
+    if runtime_value(&conn, "break_state").as_deref() != Some("BREAK") {
+        return Ok(());
+    }
+    let Some(planned_until) = runtime_value(&conn, "break_planned_until") else {
+        return Ok(());
+    };
+    let planned = parse_sqlite_time_utc(&planned_until).map_err(|err| err.to_string())?;
+    let now = chrono::Utc::now().naive_utc();
+    if now < planned {
+        return Ok(());
+    }
+    complete_break_in_conn(&conn, now)?;
+    if runtime_value(&conn, "break_ready_notified_for").as_deref() == Some(planned_until.as_str()) {
+        return Ok(());
+    }
+    set_runtime_value(&conn, "break_ready_notified_for", &planned_until)?;
+    let local_time = Local::now().format("%H:%M").to_string();
+    let body = format!("{local_time} · Можно возвращаться к работе. Перерыв завершён.");
+    let notification_id = insert_app_notification(
+        &conn,
+        "AttentionOS",
+        &body,
+        "ml_ready_to_work",
+        "{\"source\":\"break-monitor\"}",
+    )?;
+    set_runtime_value(
+        &conn,
+        "last_native_notification_id",
+        &notification_id.to_string(),
+    )?;
+    show_app_notification(app, "AttentionOS", &body);
+    Ok(())
 }
 
 fn get_latest_demo_ml_prediction() -> Result<serde_json::Value, String> {
@@ -602,6 +721,46 @@ fn get_latest_demo_ml_prediction() -> Result<serde_json::Value, String> {
         prediction["recommendation"]["recommended_break_minutes"] = serde_json::Value::Null;
         prediction["recommendation"]["policy_source"] = serde_json::json!("FALLBACK");
     }
+    match runtime_value(&conn, "break_state").as_deref() {
+        Some("BREAK") => {
+            let minutes = runtime_value(&conn, "break_planned_until")
+                .and_then(|value| parse_sqlite_time_utc(&value).ok())
+                .map(|until| {
+                    until
+                        .signed_duration_since(chrono::Utc::now().naive_utc())
+                        .num_minutes()
+                        .max(1)
+                })
+                .unwrap_or_else(latest_recommended_break_minutes);
+            prediction["state"] = serde_json::json!("BREAK");
+            prediction["recommended_action"] = serde_json::json!(format!("BREAK_{minutes}"));
+            prediction["recommended_break_minutes"] = serde_json::json!(minutes);
+            prediction["next_break_eta_minutes"] = serde_json::json!(0);
+            prediction["policy_source"] = serde_json::json!("FALLBACK");
+            prediction["recommendation"]["action"] = serde_json::json!(format!("BREAK_{minutes}"));
+            prediction["recommendation"]["state"] = serde_json::json!("BREAK");
+            prediction["recommendation"]["title"] = serde_json::json!("Break in progress");
+            prediction["recommendation"]["reason"] =
+                serde_json::json!("break_timer: recommendation is locked until the planned break ends.");
+            prediction["recommendation"]["recommended_break_minutes"] = serde_json::json!(minutes);
+            prediction["recommendation"]["policy_source"] = serde_json::json!("FALLBACK");
+        }
+        Some("READY_TO_WORK") => {
+            prediction["state"] = serde_json::json!("WORK");
+            prediction["recommended_action"] = serde_json::json!("CONTINUE");
+            prediction["recommended_break_minutes"] = serde_json::Value::Null;
+            prediction["next_break_eta_minutes"] = serde_json::json!(5);
+            prediction["policy_source"] = serde_json::json!("FALLBACK");
+            prediction["recommendation"]["action"] = serde_json::json!("CONTINUE");
+            prediction["recommendation"]["state"] = serde_json::json!("WORK");
+            prediction["recommendation"]["title"] = serde_json::json!("Work");
+            prediction["recommendation"]["reason"] =
+                serde_json::json!("break_completed: planned break finished and work can resume.");
+            prediction["recommendation"]["recommended_break_minutes"] = serde_json::Value::Null;
+            prediction["recommendation"]["policy_source"] = serde_json::json!("FALLBACK");
+        }
+        _ => {}
+    }
     Ok(prediction)
 }
 
@@ -668,6 +827,7 @@ fn start_break(minutes: Option<i64>) -> Result<BreakStatePayload, String> {
         params!["break_planned_until", until.to_string()],
     )
     .map_err(|err| err.to_string())?;
+    set_runtime_value(&conn, "break_ready_notified_for", "")?;
     let updated = conn
         .execute(
             "UPDATE recommendations SET accepted = 1, started_at = ?1, recommended_duration = ?2, \
@@ -728,30 +888,35 @@ fn finish_break() -> Result<BreakStatePayload, String> {
     let conn = Connection::open(db_path).map_err(|err| err.to_string())?;
     ensure_runtime_state(&conn)?;
     let now = chrono::Utc::now().naive_utc();
-    let started = runtime_value(&conn, "break_started_at")
+    complete_break_in_conn(&conn, now)?;
+    get_break_state()
+}
+
+fn complete_break_in_conn(
+    conn: &Connection,
+    now: chrono::NaiveDateTime,
+) -> Result<(), String> {
+    let started = runtime_value(conn, "break_started_at")
         .and_then(|value| parse_sqlite_time_utc(&value).ok());
     let actual = started
         .map(|start| now.signed_duration_since(start).num_minutes().max(0))
         .unwrap_or(0);
-    let recommendation_id = latest_started_recommendation_id(&conn);
-    let prediction_after_id = latest_prediction_id(&conn);
+    let recommendation_id = latest_started_recommendation_id(conn);
+    let prediction_after_id = latest_prediction_id(conn);
     let task_after = current_task_label();
     conn.execute(
         "UPDATE recommendations SET completed_at = ?1, actual_duration = ?2, prediction_after_id = ?3, task_after = ?4 \
-         WHERE id = (SELECT id FROM recommendations WHERE started_at IS NOT NULL ORDER BY id DESC LIMIT 1)",
+         WHERE id = (SELECT id FROM recommendations WHERE started_at IS NOT NULL AND completed_at IS NULL ORDER BY id DESC LIMIT 1)",
         params![now.to_string(), actual, prediction_after_id, task_after],
     )
     .map_err(|err| err.to_string())?;
     if let Some(id) = recommendation_id {
-        persist_recommendation_outcome(&conn, id, true, false)?;
+        persist_recommendation_outcome(conn, id, true, false)?;
     }
-    conn.execute(
-        "INSERT INTO app_runtime_state (key, value) VALUES (?1, ?2) \
-         ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-        params!["break_state", "READY_TO_WORK"],
-    )
-    .map_err(|err| err.to_string())?;
-    get_break_state()
+    set_runtime_value(conn, "break_state", "READY_TO_WORK")?;
+    set_runtime_value(conn, "last_meaningful_break_at", &now.to_string())?;
+    set_runtime_value(conn, "current_work_episode_started_at", &now.to_string())?;
+    Ok(())
 }
 
 #[tauri::command]
@@ -875,7 +1040,15 @@ fn ensure_runtime_state(conn: &Connection) -> Result<(), String> {
          action TEXT, accepted INTEGER DEFAULT 0, ignored INTEGER DEFAULT 0, planned_duration INTEGER, \
          actual_duration REAL, prediction_before_id INTEGER, prediction_after_id INTEGER, \
          effectiveness_before REAL, effectiveness_after REAL, decline_30m_before REAL, decline_30m_after REAL, \
-         task_before TEXT, task_after TEXT)",
+         task_before TEXT, task_after TEXT, active_minutes_during_break REAL, idle_minutes_during_break REAL, \
+         rest_task_minutes_during_break REAL, restful_break_score REAL)",
+        [],
+    )
+    .map_err(|err| err.to_string())?;
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS notifications (\
+         id INTEGER PRIMARY KEY AUTOINCREMENT, created_at TEXT NOT NULL, title TEXT NOT NULL, body TEXT NOT NULL, \
+         state TEXT NOT NULL, intervention_id INTEGER, kind TEXT NOT NULL, action_payload TEXT)",
         [],
     )
     .map_err(|err| err.to_string())?;
@@ -885,6 +1058,30 @@ fn ensure_runtime_state(conn: &Connection) -> Result<(), String> {
     ensure_column(conn, "recommendations", "prediction_after_id", "INTEGER")?;
     ensure_column(conn, "recommendations", "task_before", "TEXT")?;
     ensure_column(conn, "recommendations", "task_after", "TEXT")?;
+    ensure_column(
+        conn,
+        "recommendation_outcomes",
+        "active_minutes_during_break",
+        "REAL",
+    )?;
+    ensure_column(
+        conn,
+        "recommendation_outcomes",
+        "idle_minutes_during_break",
+        "REAL",
+    )?;
+    ensure_column(
+        conn,
+        "recommendation_outcomes",
+        "rest_task_minutes_during_break",
+        "REAL",
+    )?;
+    ensure_column(
+        conn,
+        "recommendation_outcomes",
+        "restful_break_score",
+        "REAL",
+    )?;
     Ok(())
 }
 
@@ -919,6 +1116,43 @@ fn runtime_value(conn: &Connection, key: &str) -> Option<String> {
         |row| row.get(0),
     )
     .ok()
+}
+
+fn set_runtime_value(conn: &Connection, key: &str, value: &str) -> Result<(), String> {
+    conn.execute(
+        "INSERT INTO app_runtime_state (key, value) VALUES (?1, ?2) \
+         ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+        params![key, value],
+    )
+    .map_err(|err| err.to_string())?;
+    Ok(())
+}
+
+fn insert_app_notification(
+    conn: &Connection,
+    title: &str,
+    body: &str,
+    kind: &str,
+    action_payload: &str,
+) -> Result<i64, String> {
+    ensure_runtime_state(conn)?;
+    conn.execute(
+        "INSERT INTO notifications (created_at, title, body, state, intervention_id, kind, action_payload) \
+         VALUES (?1, ?2, ?3, 'unread', NULL, ?4, ?5)",
+        params![
+            chrono::Utc::now().naive_utc().to_string(),
+            title,
+            body,
+            kind,
+            action_payload,
+        ],
+    )
+    .map_err(|err| err.to_string())?;
+    Ok(conn.last_insert_rowid())
+}
+
+fn show_app_notification(app: &AppHandle, title: &str, body: &str) {
+    let _ = app.notification().builder().title(title).body(body).show();
 }
 
 fn break_ignore_active(conn: &Connection) -> bool {
@@ -972,7 +1206,7 @@ fn latest_break_recommendation_id(conn: &Connection) -> Option<i64> {
 
 fn latest_started_recommendation_id(conn: &Connection) -> Option<i64> {
     conn.query_row(
-        "SELECT id FROM recommendations WHERE started_at IS NOT NULL ORDER BY id DESC LIMIT 1",
+        "SELECT id FROM recommendations WHERE started_at IS NOT NULL AND completed_at IS NULL ORDER BY id DESC LIMIT 1",
         [],
         |row| row.get(0),
     )
@@ -1016,6 +1250,7 @@ fn persist_recommendation_outcome(
         .map_err(|err| err.to_string())?;
     let before = prediction_snapshot(conn, row.3);
     let after = prediction_snapshot(conn, row.4.or_else(|| latest_prediction_id(conn)));
+    let break_quality = recommendation_break_quality(conn, recommendation_id);
     conn.execute(
         "INSERT INTO recommendation_outcomes (recommendation_id, created_at, action, accepted, ignored, planned_duration, actual_duration, \
          prediction_before_id, prediction_after_id, effectiveness_before, effectiveness_after, decline_30m_before, decline_30m_after, task_before, task_after) \
@@ -1039,7 +1274,55 @@ fn persist_recommendation_outcome(
         ],
     )
     .map_err(|err| err.to_string())?;
+    conn.execute(
+        "UPDATE recommendation_outcomes SET active_minutes_during_break = ?1, idle_minutes_during_break = ?2, \
+         rest_task_minutes_during_break = ?3, restful_break_score = ?4 WHERE id = last_insert_rowid()",
+        params![
+            break_quality.0,
+            break_quality.1,
+            break_quality.2,
+            break_quality.3,
+        ],
+    )
+    .map_err(|err| err.to_string())?;
     Ok(())
+}
+
+fn recommendation_break_quality(conn: &Connection, recommendation_id: i64) -> (f64, f64, f64, f64) {
+    if !table_exists(conn, "activity_events").unwrap_or(false) {
+        return (0.0, 0.0, 0.0, 0.0);
+    }
+    let row = conn
+        .query_row(
+            "SELECT started_at, completed_at, COALESCE(actual_duration, recommended_duration, 0) FROM recommendations WHERE id = ?1",
+            params![recommendation_id],
+            |row| {
+                Ok((
+                    row.get::<_, Option<String>>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, Option<f64>>(2)?,
+                ))
+            },
+        )
+        .ok();
+    let Some((Some(started_at), Some(completed_at), planned_duration)) = row else {
+        return (0.0, 0.0, 0.0, 0.0);
+    };
+    let result = conn.query_row(
+        "SELECT \
+         COALESCE(SUM(CASE WHEN COALESCE(idle_seconds, 0) < 120 THEN MAX((julianday(ts_end) - julianday(ts_start)) * 1440.0, 0) ELSE 0 END), 0), \
+         COALESCE(SUM(CASE WHEN COALESCE(idle_seconds, 0) >= 120 THEN MAX((julianday(ts_end) - julianday(ts_start)) * 1440.0, 0) ELSE 0 END), 0), \
+         COALESCE(SUM(CASE WHEN lower(COALESCE(task_label, '')) IN ('rest', 'отдых') THEN MAX((julianday(ts_end) - julianday(ts_start)) * 1440.0, 0) ELSE 0 END), 0) \
+         FROM activity_events WHERE ts_start < ?2 AND ts_end > ?1",
+        params![started_at, completed_at],
+        |row| Ok((row.get::<_, f64>(0)?, row.get::<_, f64>(1)?, row.get::<_, f64>(2)?)),
+    );
+    let Ok((active, idle, rest_task)) = result else {
+        return (0.0, 0.0, 0.0, 0.0);
+    };
+    let denom = planned_duration.unwrap_or(0.0).max(active + idle).max(1.0);
+    let score = ((idle + rest_task * 0.75 - active * 0.25) / denom).clamp(0.0, 1.0);
+    (active, idle, rest_task, score)
 }
 
 fn prediction_snapshot(conn: &Connection, id: Option<i64>) -> Option<(f64, f64)> {
@@ -1828,8 +2111,17 @@ fn daily_summary_from_db(conn: &Connection, date: &str) -> DailySummaryDb {
     if table_exists(conn, "recommendation_outcomes").unwrap_or(false) {
         summary.recovered_effective_minutes_estimate = conn
             .query_row(
-                "SELECT COALESCE(SUM(MAX(COALESCE(effectiveness_after, 0) - COALESCE(effectiveness_before, 0), 0) * COALESCE(actual_duration, planned_duration, 10) / 100.0), 0) \
-                 FROM recommendation_outcomes WHERE accepted = 1 AND substr(datetime(created_at, 'localtime'), 1, 10) = ?1",
+                "SELECT COALESCE(SUM( \
+                    MAX( \
+                        COALESCE(o.effectiveness_after, COALESCE(o.effectiveness_before, 0) + COALESCE(p.break_benefit, 0) * 3.0) \
+                        - COALESCE(o.effectiveness_before, 0), \
+                        0 \
+                    ) * COALESCE(o.actual_duration, o.planned_duration, 10) / 100.0 \
+                    * (0.55 + COALESCE(o.restful_break_score, 0.5) * 0.45) \
+                 ), 0) \
+                 FROM recommendation_outcomes o \
+                 LEFT JOIN ml_predictions p ON p.id = o.prediction_before_id \
+                 WHERE o.accepted = 1 AND substr(datetime(o.created_at, 'localtime'), 1, 10) = ?1",
                 params![date],
                 |row| row.get::<_, f64>(0),
             )
@@ -1866,7 +2158,8 @@ pub fn run() {
                 &handle,
                 load_runtime_settings().preferences.launch_on_startup,
             )?;
-            spawn_demo_ml_scheduler();
+            spawn_demo_ml_scheduler(handle.clone());
+            spawn_break_monitor(handle.clone());
             let show = MenuItem::with_id(app, "show", "Show AttentionOS", true, None::<&str>)?;
             let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
             let menu = Menu::with_items(app, &[&show, &quit])?;
@@ -1925,6 +2218,7 @@ pub fn run() {
             evaluate_recommendations,
             get_demo_ml_prediction,
             get_ml_diagnostics,
+            train_personal_model,
             create_test_notification,
             start_break,
             ignore_break,

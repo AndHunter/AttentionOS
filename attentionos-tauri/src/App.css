@@ -386,6 +386,12 @@
   margin-top: 12px;
 }
 
+.risk-note {
+  margin: 10px 0 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+
 .daily-summary {
   margin-top: 14px;
 }
@@ -417,6 +423,11 @@
   gap: 14px;
 }
 
+.state-history-wrap {
+  display: grid;
+  gap: 10px;
+}
+
 .state-history {
   position: relative;
   height: 164px;
@@ -433,16 +444,20 @@
   background: linear-gradient(to top, transparent 49%, color-mix(in srgb, var(--border) 70%, transparent) 50%, transparent 51%);
 }
 
-.state-history span {
+.state-history span,
+.state-history button {
+  all: unset;
   position: absolute;
   width: 7px;
   height: 7px;
   margin-left: -3px;
   border-radius: 999px;
   background: var(--accent);
+  cursor: pointer;
 }
 
-.state-history span.break {
+.state-history span.break,
+.state-history button.break {
   top: 0;
   bottom: 0;
   width: 6px;
@@ -451,11 +466,17 @@
   background: color-mix(in srgb, var(--warning) 34%, transparent);
 }
 
-.state-history span.recommendation {
+.state-history span.recommendation,
+.state-history button.recommendation {
   width: 10px;
   height: 10px;
   background: var(--warning);
   box-shadow: 0 0 0 4px color-mix(in srgb, var(--warning) 18%, transparent);
+}
+
+.state-history button.selected {
+  outline: 2px solid color-mix(in srgb, var(--accent) 38%, transparent);
+  outline-offset: 4px;
 }
 
 .state-history i {
@@ -465,6 +486,18 @@
   width: 2px;
   background: var(--danger);
   opacity: 0.75;
+}
+
+.state-detail {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 14px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.state-detail strong {
+  color: var(--text);
 }
 
 .bar-row > div:first-child {
