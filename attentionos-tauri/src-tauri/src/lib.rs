@@ -22,6 +22,9 @@ use std::os::windows::process::CommandExt;
 
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x08000000;
+const MAX_EVENT_DURATION_SECONDS: i64 = 15;
+const TIMELINE_GAP_IDLE_MINUTES: i64 = 5;
+const MIN_FOCUS_BLOCK_SECONDS: i64 = 60;
 
 struct CollectorProcess {
     child: Mutex<Option<Child>>,
@@ -314,6 +317,7 @@ fn mark_notification_read(id: i64) -> Result<(), String> {
         params![id],
     )
     .map_err(|err| err.to_string())?;
+    mark_break_notifications_read(&conn)?;
     Ok(())
 }
 
@@ -351,6 +355,7 @@ fn save_self_report(report: SelfReportPayload) -> Result<(), String> {
         ],
     )
     .map_err(|err| err.to_string())?;
+    mark_break_notifications_read(&conn)?;
     Ok(())
 }
 
@@ -654,7 +659,7 @@ fn complete_expired_break(app: &AppHandle) -> Result<(), String> {
     }
     set_runtime_value(&conn, "break_ready_notified_for", &planned_until)?;
     let local_time = Local::now().format("%H:%M").to_string();
-    let body = format!("{local_time} · Можно возвращаться к работе. Перерыв завершён.");
+    let body = format!("{local_time} - Можно возвращаться к работе. Перерыв завершен.");
     let notification_id = insert_app_notification(
         &conn,
         "AttentionOS",
@@ -1208,6 +1213,9 @@ fn insert_app_notification(
 }
 
 fn mark_break_notifications_read(conn: &Connection) -> Result<(), String> {
+    if !table_exists(conn, "notifications").unwrap_or(false) {
+        return Ok(());
+    }
     conn.execute(
         "UPDATE notifications SET state = 'read' \
          WHERE state = 'unread' AND kind = 'ml_break_recommendation'",
@@ -1861,11 +1869,7 @@ fn build_dashboard(
         .filter(|item| is_active_event(item.event, idle_threshold_seconds))
         .map(|item| item.duration_seconds)
         .sum::<i64>();
-    let focused_seconds = timed_events
-        .iter()
-        .filter(|item| is_focus_event(item.event, idle_threshold_seconds))
-        .map(|item| item.duration_seconds)
-        .sum::<i64>();
+    let focused_seconds = focused_activity_seconds(&timed_events, idle_threshold_seconds);
     let context_switches = count_switches(&events);
     let top_apps = top_apps(&timed_events, active_seconds, idle_threshold_seconds);
     let timeline = timeline_segments(&timed_events, idle_threshold_seconds);
@@ -1969,7 +1973,7 @@ fn timed_events(events: &[EventRow]) -> Vec<TimedEvent<'_>> {
                         .num_seconds()
                 })
                 .unwrap_or_else(|| event_duration_seconds(event).max(3));
-            let duration_seconds = raw_seconds.clamp(1, 15);
+            let duration_seconds = raw_seconds.clamp(1, MAX_EVENT_DURATION_SECONDS);
             let start_minute = minute_of_day(&event.ts_start);
             let end_minute = start_minute + ((duration_seconds as f64) / 60.0).ceil() as i64;
             TimedEvent {
@@ -2035,6 +2039,39 @@ fn is_focus_event(event: &EventRow, idle_threshold_seconds: f64) -> bool {
         && is_productive_task(event.task_label.as_deref())
 }
 
+fn focused_activity_seconds(events: &[TimedEvent<'_>], idle_threshold_seconds: f64) -> i64 {
+    let mut total = 0;
+    let mut block_seconds = 0;
+    let mut block_app = String::new();
+    let mut block_task: Option<String> = None;
+    let mut block_end_minute = 0;
+
+    for item in events
+        .iter()
+        .filter(|item| is_focus_event(item.event, idle_threshold_seconds))
+    {
+        let app = clean_app_name(&item.event.process_name);
+        let same_block = block_seconds > 0
+            && block_app == app
+            && block_task == item.event.task_label
+            && item.start_minute <= block_end_minute + 1;
+        if !same_block {
+            if block_seconds >= MIN_FOCUS_BLOCK_SECONDS {
+                total += block_seconds;
+            }
+            block_seconds = 0;
+            block_app = app;
+            block_task = item.event.task_label.clone();
+        }
+        block_seconds += item.duration_seconds;
+        block_end_minute = item.end_minute;
+    }
+    if block_seconds >= MIN_FOCUS_BLOCK_SECONDS {
+        total += block_seconds;
+    }
+    total
+}
+
 fn is_productive_task(task: Option<&str>) -> bool {
     let Some(task) = task else {
         return false;
@@ -2090,9 +2127,40 @@ fn timeline_segments(
     idle_threshold_seconds: f64,
 ) -> Vec<TimelineSegment> {
     let mut segments: Vec<TimelineSegment> = Vec::new();
+    let mut last_end: Option<i64> = None;
     for item in events {
-        let start = item.start_minute;
-        let end = item.end_minute;
+        let start = item.start_minute.clamp(0, 24 * 60);
+        if start >= 24 * 60 {
+            continue;
+        }
+        let end = item.end_minute.clamp(start + 1, 24 * 60);
+        if let Some(previous_end) = last_end {
+            if start - previous_end >= TIMELINE_GAP_IDLE_MINUTES {
+                push_timeline_segment(
+                    &mut segments,
+                    TimelineSegment {
+                        app: "Idle".to_string(),
+                        task: None,
+                        kind: "idle".to_string(),
+                        start_minute: previous_end,
+                        end_minute: start,
+                        duration_minutes: (start - previous_end).max(1),
+                    },
+                );
+            }
+        } else if start >= TIMELINE_GAP_IDLE_MINUTES {
+            push_timeline_segment(
+                &mut segments,
+                TimelineSegment {
+                    app: "Idle".to_string(),
+                    task: None,
+                    kind: "idle".to_string(),
+                    start_minute: 0,
+                    end_minute: start,
+                    duration_minutes: start.max(1),
+                },
+            );
+        }
         let is_idle = !is_active_event(item.event, idle_threshold_seconds);
         let app = if is_idle {
             "Idle".to_string()
@@ -2100,23 +2168,39 @@ fn timeline_segments(
             clean_app_name(&item.event.process_name)
         };
         let kind = if is_idle { "idle" } else { "app" }.to_string();
-        if let Some(last) = segments.last_mut() {
-            if last.app == app && last.task == item.event.task_label && last.kind == kind {
-                last.end_minute = end;
-                last.duration_minutes = (last.end_minute - last.start_minute).max(1);
-                continue;
-            }
-        }
-        segments.push(TimelineSegment {
-            app,
-            task: item.event.task_label.clone(),
-            kind,
-            start_minute: start,
-            end_minute: end,
-            duration_minutes: (end - start).max(1),
-        });
+        push_timeline_segment(
+            &mut segments,
+            TimelineSegment {
+                app,
+                task: item.event.task_label.clone(),
+                kind,
+                start_minute: start,
+                end_minute: end,
+                duration_minutes: (end - start).max(1),
+            },
+        );
+        last_end = Some(last_end.map(|value| value.max(end)).unwrap_or(end));
     }
     segments
+}
+
+fn push_timeline_segment(segments: &mut Vec<TimelineSegment>, segment: TimelineSegment) {
+    if segment.end_minute <= segment.start_minute {
+        return;
+    }
+    if let Some(last) = segments.last_mut() {
+        let contiguous = segment.start_minute <= last.end_minute + 1;
+        if contiguous
+            && last.app == segment.app
+            && last.task == segment.task
+            && last.kind == segment.kind
+        {
+            last.end_minute = last.end_minute.max(segment.end_minute);
+            last.duration_minutes = (last.end_minute - last.start_minute).max(1);
+            return;
+        }
+    }
+    segments.push(segment);
 }
 
 fn recent_sessions(events: &[TimedEvent<'_>], idle_threshold_seconds: f64) -> Vec<RecentSession> {
@@ -2308,6 +2392,87 @@ fn best_work_block(sessions: &[RecentSession]) -> Option<String> {
                 session.task.clone().unwrap_or_else(|| "None".to_string())
             )
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn event(process_name: &str, task_label: Option<&str>) -> EventRow {
+        EventRow {
+            ts_start: "2026-08-23 00:00:00".to_string(),
+            ts_end: "2026-08-23 00:00:15".to_string(),
+            process_name: process_name.to_string(),
+            idle_seconds: 0.0,
+            keyboard_events: 1,
+            mouse_events: 0,
+            task_label: task_label.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn timeline_inserts_idle_gap_and_does_not_merge_across_pc_off_time() {
+        let rows = vec![event("Code.exe", Some("ml")), event("Code.exe", Some("ml"))];
+        let items = vec![
+            TimedEvent {
+                event: &rows[0],
+                duration_seconds: 15,
+                start_minute: 16 * 60 + 50,
+                end_minute: 16 * 60 + 51,
+            },
+            TimedEvent {
+                event: &rows[1],
+                duration_seconds: 15,
+                start_minute: 21 * 60 + 30,
+                end_minute: 21 * 60 + 31,
+            },
+        ];
+
+        let segments = timeline_segments(&items, 300.0);
+        let active_code_segments = segments
+            .iter()
+            .filter(|segment| segment.kind == "app" && segment.app == "Code")
+            .count();
+        let gap = segments.iter().find(|segment| {
+            segment.kind == "idle"
+                && segment.start_minute == 16 * 60 + 51
+                && segment.end_minute == 21 * 60 + 30
+        });
+
+        assert_eq!(active_code_segments, 2);
+        assert!(gap.is_some());
+    }
+
+    #[test]
+    fn focus_time_counts_stable_blocks_not_all_active_seconds() {
+        let rows = vec![
+            event("Code.exe", Some("ml")),
+            event("Code.exe", Some("ml")),
+            event("Code.exe", Some("ml")),
+            event("Code.exe", Some("ml")),
+            event("Chrome.exe", Some("ml")),
+            event("Telegram.exe", Some("ml")),
+        ];
+        let items = rows
+            .iter()
+            .enumerate()
+            .map(|(index, row)| TimedEvent {
+                event: row,
+                duration_seconds: 15,
+                start_minute: index as i64,
+                end_minute: index as i64 + 1,
+            })
+            .collect::<Vec<_>>();
+        let active_seconds = items
+            .iter()
+            .filter(|item| is_active_event(item.event, 300.0))
+            .map(|item| item.duration_seconds)
+            .sum::<i64>();
+        let focus_seconds = focused_activity_seconds(&items, 300.0);
+
+        assert_eq!(active_seconds, 90);
+        assert_eq!(focus_seconds, 60);
+    }
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]

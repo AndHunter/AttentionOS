@@ -21,6 +21,7 @@ from attentionos.ml.personal_train import load_personal_effectiveness
 INFERENCE_INTERVAL_SECONDS = 60
 MIN_WORK_RECOMMENDATION_HOLD_MINUTES = 15
 POST_BREAK_WORK_GRACE_MINUTES = 20
+PENDING_BREAK_RECOMMENDATION_MAX_HOURS = 12
 
 
 def run_demo_inference(
@@ -346,6 +347,7 @@ def _persist_prediction(db_path: Path, result: dict[str, object], now_local: dat
             result.get("state") == "BREAK_RECOMMENDED"
             and runtime_break_state != "BREAK"
             and not previous_action.startswith("BREAK")
+            and not _pending_break_recommendation_exists(conn, now_utc)
             and not _break_notification_in_cooldown(conn, now_utc, cooldown_minutes)
             and not _break_recommendation_ignored(conn, now_utc)
         )
@@ -623,6 +625,22 @@ def _break_recommendation_ignored(conn: sqlite3.Connection, now_utc: str) -> boo
     return now < until
 
 
+def _pending_break_recommendation_exists(conn: sqlite3.Connection, now_utc: str) -> bool:
+    now = datetime.fromisoformat(now_utc).replace(tzinfo=UTC)
+    since = now - timedelta(hours=PENDING_BREAK_RECOMMENDATION_MAX_HOURS)
+    row = conn.execute(
+        "SELECT 1 FROM recommendations "
+        "WHERE recommended_action LIKE 'BREAK_%' "
+        "AND COALESCE(ignored, 0) = 0 "
+        "AND COALESCE(accepted, 0) = 0 "
+        "AND completed_at IS NULL "
+        "AND timestamp >= ?1 "
+        "ORDER BY id DESC LIMIT 1",
+        (since.replace(tzinfo=None).isoformat(sep=" "),),
+    ).fetchone()
+    return row is not None
+
+
 def _active_break_lock(
     db_path: Path,
     now_local: datetime,
@@ -666,13 +684,12 @@ def _active_break_lock(
         conn.close()
     if row is None:
         return None
-    created_utc = datetime.fromisoformat(str(row[0])).replace(tzinfo=UTC)
     minutes = int(row[2] or 0)
     if minutes <= 0:
         return None
-    until_utc = created_utc + timedelta(minutes=minutes)
+    created_utc = datetime.fromisoformat(str(row[0])).replace(tzinfo=UTC)
     now_utc = now_local.astimezone(UTC)
-    if now_utc >= until_utc:
+    if now_utc - created_utc > timedelta(hours=PENDING_BREAK_RECOMMENDATION_MAX_HOURS):
         return None
     action = str(row[1] or f"BREAK_{minutes}")
     return {
@@ -680,7 +697,7 @@ def _active_break_lock(
         "action": action,
         "minutes": minutes,
         "benefit": 7.0,
-        "until_local": until_utc.astimezone(now_local.tzinfo).strftime("%H:%M"),
+        "until_local": "user action",
     }
 
 

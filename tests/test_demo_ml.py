@@ -137,7 +137,7 @@ def test_high_break_utility_can_trigger_break_before_high_decline() -> None:
     assert result.reason.startswith("action_utility")
 
 
-def test_break_recommendation_is_locked_for_duration(tmp_path) -> None:
+def test_pending_break_recommendation_waits_for_user_action(tmp_path) -> None:
     import sqlite3
 
     db = tmp_path / "attentionos.db"
@@ -162,7 +162,60 @@ def test_break_recommendation_is_locked_for_duration(tmp_path) -> None:
     assert lock is not None
     assert lock["action"] == "BREAK_15"
     assert lock["minutes"] == 15
-    assert _active_break_lock(db, now + timedelta(minutes=11)) is None
+    assert _active_break_lock(db, now + timedelta(minutes=45)) is not None
+
+
+def test_pending_break_recommendation_blocks_duplicate_notification(tmp_path) -> None:
+    import sqlite3
+
+    db = tmp_path / "attentionos.db"
+    conn = sqlite3.connect(db)
+    _ensure_ml_tables(conn)
+    now = datetime(2026, 1, 1, 12, 10, tzinfo=UTC)
+    conn.execute(
+        "INSERT INTO recommendations ("
+        "timestamp, recommended_action, recommended_duration, accepted"
+        ") VALUES (?1, 'BREAK_15', 15, 0)",
+        ((now - timedelta(minutes=20)).replace(tzinfo=None).isoformat(sep=" "),),
+    )
+    conn.execute(
+        "INSERT INTO ml_predictions (timestamp, recommended_action) VALUES (?1, 'CONTINUE')",
+        ((now - timedelta(minutes=1)).replace(tzinfo=None).isoformat(sep=" "),),
+    )
+    conn.commit()
+    conn.close()
+
+    result = {
+        "model_version": "demo-test",
+        "state": "BREAK_RECOMMENDED",
+        "current_effectiveness": 45.0,
+        "decline_15m": 0.7,
+        "decline_30m": 0.8,
+        "decline_60m": 0.9,
+        "break_benefit": 8.0,
+        "recommended_action": "BREAK_15",
+        "recommended_break_minutes": 15,
+        "next_break_eta_minutes": 0,
+        "policy_source": "MODEL",
+        "diagnostics": {},
+        "recommendation": {
+            "continue_utility": 42.0,
+            "best_break_utility": 76.0,
+            "confidence": 0.9,
+            "utilities": {"CONTINUE": 42.0, "BREAK_15": 76.0},
+        },
+    }
+
+    _persist_prediction(db, result, now)
+
+    conn = sqlite3.connect(db)
+    notification_count = conn.execute(
+        "SELECT COUNT(*) FROM notifications WHERE kind = 'ml_break_recommendation'"
+    ).fetchone()[0]
+    recommendation_count = conn.execute("SELECT COUNT(*) FROM recommendations").fetchone()[0]
+    conn.close()
+    assert notification_count == 0
+    assert recommendation_count == 1
 
 
 def test_runtime_break_state_locks_break_without_new_break_notification(tmp_path) -> None:

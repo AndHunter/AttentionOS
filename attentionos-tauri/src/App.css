@@ -261,6 +261,16 @@
   line-height: 1.35;
 }
 
+.panel > .panel-header p,
+.state-card p,
+.metric-detail,
+.risk-note,
+.signal-list,
+.timeline-detail,
+.state-detail {
+  display: none;
+}
+
 .panel {
   padding: 20px;
   margin-bottom: 16px;
