@@ -7,7 +7,7 @@ import sqlite3
 import sys
 import time
 from dataclasses import replace
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import numpy as np
@@ -18,8 +18,9 @@ from attentionos.ml.demo.features import build_features_at, feature_schema, real
 from attentionos.ml.demo.recommendation_engine import recommend_action
 from attentionos.ml.personal_train import load_personal_effectiveness
 
-
 INFERENCE_INTERVAL_SECONDS = 60
+MIN_WORK_RECOMMENDATION_HOLD_MINUTES = 15
+POST_BREAK_WORK_GRACE_MINUTES = 20
 
 
 def run_demo_inference(
@@ -45,7 +46,9 @@ def run_demo_inference(
         diagnostics["active_minutes"] = round(active_minutes, 2)
         telemetry_minutes = max(active_minutes, float(diagnostics["telemetry_available_minutes"]))
         if telemetry_minutes < min_minutes:
-            diagnostics["warmup_reason"] = f"Накоплено {telemetry_minutes:.0f} из {min_minutes} минут telemetry."
+            diagnostics["warmup_reason"] = (
+                f"Накоплено {telemetry_minutes:.0f} из {min_minutes} минут telemetry."
+            )
             return _warmup(diagnostics["warmup_reason"], started, diagnostics, telemetry_minutes)
 
         row = build_features_at(frame, frame["timestamp"].max())
@@ -55,7 +58,9 @@ def run_demo_inference(
         models = _load_models(resolved_model_dir) if resolved_model_dir else None
         diagnostics["model_loaded"] = models is not None
         if models is None:
-            diagnostics["warmup_reason"] = "DEMO model files are missing; train or package models/demo."
+            diagnostics["warmup_reason"] = (
+                "DEMO model files are missing; train or package models/demo."
+            )
             return _warmup("DEMO model files are missing.", started, diagnostics, telemetry_minutes)
 
         metadata, eff, decline, benefit = models
@@ -67,7 +72,12 @@ def run_demo_inference(
         if personal is not None:
             personal_raw, personal_weight, personal_version = personal
             current_effectiveness_raw = float(
-                np.clip(current_effectiveness_raw * (1 - personal_weight) + personal_raw * personal_weight, 1, 5)
+                np.clip(
+                    current_effectiveness_raw * (1 - personal_weight)
+                    + personal_raw * personal_weight,
+                    1,
+                    5,
+                )
             )
             diagnostics["personal_model_loaded"] = True
             diagnostics["personal_model_version"] = personal_version
@@ -80,7 +90,13 @@ def run_demo_inference(
         decline_15m = float(np.clip(decline_base * 0.72 + trend_pressure * 0.10, 0, 1))
         decline_30m = float(np.clip(decline_base + trend_pressure * 0.08, 0, 1))
         decline_60m = float(
-            np.clip(decline_base * 1.18 + trend_pressure * 0.14 + float(row["continuous_work_minutes"]) / 600, 0, 1)
+            np.clip(
+                decline_base * 1.18
+                + trend_pressure * 0.14
+                + float(row["continuous_work_minutes"]) / 600,
+                0,
+                1,
+            )
         )
         raw_break_benefit = float(np.clip(benefit.predict(x)[0], 0, 1))
         recommendation = recommend_action(
@@ -105,16 +121,32 @@ def run_demo_inference(
         tracking_elapsed = _tracking_elapsed_minutes(tracking_started_at, now_local)
         break_lock = _active_break_lock(db, now_local, tracking_started_at)
         if break_lock is not None:
+            lock_state = str(break_lock.get("state") or "BREAK_RECOMMENDED")
             recommendation = replace(
                 recommendation,
                 action=break_lock["action"],
-                state="BREAK_RECOMMENDED",
-                title="Break in progress",
+                state=lock_state,  # type: ignore[arg-type]
+                title="Break in progress" if lock_state == "BREAK" else "Break recommended",
                 reason=f"break_lock: recommendation is held until {break_lock['until_local']}.",
                 confidence=max(recommendation.confidence, 0.9),
                 recommended_break_minutes=break_lock["minutes"],
                 break_benefit=max(recommendation.break_benefit, float(break_lock["benefit"])),
                 next_break_eta_minutes=0,
+                policy_source="FALLBACK",
+            )
+        elif post_break_grace := _post_break_work_grace(db, now_local):
+            recommendation = replace(
+                recommendation,
+                action="CONTINUE",
+                state="WORK",
+                title="Work",
+                reason=(
+                    "post_break_grace: stable work recommendation until "
+                    f"{post_break_grace['until_local']}."
+                ),
+                confidence=max(recommendation.confidence, 0.86),
+                recommended_break_minutes=None,
+                next_break_eta_minutes=post_break_grace["remaining_minutes"],
                 policy_source="FALLBACK",
             )
         elif tracking_elapsed is not None and tracking_elapsed < 30:
@@ -123,10 +155,32 @@ def run_demo_inference(
                 action="CONTINUE",
                 state="WORK",
                 title="Work",
-                reason=f"fresh_tracking_start: only {tracking_elapsed:.0f} minutes since Start Tracking.",
+                reason=(
+                    f"fresh_tracking_start: only {tracking_elapsed:.0f} minutes since "
+                    "Start Tracking."
+                ),
                 confidence=max(recommendation.confidence, 0.82),
                 recommended_break_minutes=None,
                 next_break_eta_minutes=5,
+                policy_source="FALLBACK",
+            )
+        elif (
+            recommendation.state == "BREAK_RECOMMENDED"
+            and (work_hold := _active_work_hold(db, now_local)) is not None
+            and not _should_override_work_hold(recommendation, decline_15m, decline_60m)
+        ):
+            recommendation = replace(
+                recommendation,
+                action="CONTINUE",
+                state="WORK",
+                title="Work",
+                reason=(
+                    "work_hysteresis: keeping WORK until "
+                    f"{work_hold['until_local']} before changing recommendation."
+                ),
+                confidence=max(0.72, 1.0 - decline_30m),
+                recommended_break_minutes=None,
+                next_break_eta_minutes=work_hold["remaining_minutes"],
                 policy_source="FALLBACK",
             )
         result = {
@@ -184,7 +238,12 @@ def _load_models(model_dir: Path | None):
     if model_dir is None:
         return None
     metadata_path = model_dir / "metadata.json"
-    model_paths = [metadata_path, model_dir / "effectiveness.cbm", model_dir / "decline.cbm", model_dir / "break_benefit.cbm"]
+    model_paths = [
+        metadata_path,
+        model_dir / "effectiveness.cbm",
+        model_dir / "decline.cbm",
+        model_dir / "break_benefit.cbm",
+    ]
     if not all(path.exists() for path in model_paths):
         return None
     from catboost import CatBoostClassifier, CatBoostRegressor
@@ -216,11 +275,12 @@ def _load_recent_events(db_path: Path, now_local: datetime) -> list[dict[str, ob
     if not db_path.exists():
         return []
     since_local = now_local - timedelta(hours=24)
-    since_utc = since_local.astimezone(timezone.utc).replace(tzinfo=None)
+    since_utc = since_local.astimezone(UTC).replace(tzinfo=None)
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
     rows = conn.execute(
-        "SELECT ts_start, ts_end, process_name, idle_seconds, keyboard_events, mouse_events, task_label "
+        "SELECT ts_start, ts_end, process_name, idle_seconds, keyboard_events, "
+        "mouse_events, task_label "
         "FROM activity_events WHERE ts_start >= ? ORDER BY ts_start ASC",
         (since_utc.isoformat(sep=" "),),
     ).fetchall()
@@ -260,7 +320,11 @@ def _compact_inference_frame(frame: pd.DataFrame) -> pd.DataFrame:
         .reset_index()
     )
     old_agg["day"] = old_agg["timestamp"].dt.date.astype(str)
-    return pd.concat([old_agg, recent], ignore_index=True).sort_values("timestamp").reset_index(drop=True)
+    return (
+        pd.concat([old_agg, recent], ignore_index=True)
+        .sort_values("timestamp")
+        .reset_index(drop=True)
+    )
 
 
 def _persist_prediction(db_path: Path, result: dict[str, object], now_local: datetime) -> None:
@@ -269,13 +333,15 @@ def _persist_prediction(db_path: Path, result: dict[str, object], now_local: dat
     conn = sqlite3.connect(db_path)
     try:
         _ensure_ml_tables(conn)
-        now_utc = now_local.astimezone(timezone.utc).replace(tzinfo=None).isoformat(sep=" ")
+        now_utc = now_local.astimezone(UTC).replace(tzinfo=None).isoformat(sep=" ")
         rec = result["recommendation"]
         assert isinstance(rec, dict)
         previous_action = _previous_prediction_action(conn)
-        cooldown_minutes = get_config().intervention.cooldown_minutes
+        cooldown_minutes = _notification_cooldown_minutes()
+        runtime_break_state = _runtime_value(conn, "break_state")
         should_notify_break = (
             result.get("state") == "BREAK_RECOMMENDED"
+            and runtime_break_state != "BREAK"
             and not previous_action.startswith("BREAK")
             and not _break_notification_in_cooldown(conn, now_utc, cooldown_minutes)
             and not _break_recommendation_ignored(conn, now_utc)
@@ -284,13 +350,19 @@ def _persist_prediction(db_path: Path, result: dict[str, object], now_local: dat
             result.get("state") == "WORK"
             and previous_action.startswith("BREAK")
             and result.get("recommended_action") == "CONTINUE"
-            and not _notification_in_cooldown(conn, "ml_ready_to_work", now_utc, max(5, cooldown_minutes))
+            and not _notification_in_cooldown(
+                conn,
+                "ml_ready_to_work",
+                now_utc,
+                max(5, cooldown_minutes),
+            )
         )
         conn.execute(
             "INSERT INTO ml_predictions ("
             "timestamp, model_version, effectiveness, decline_15m, decline_30m, decline_60m, "
             "continue_utility, best_break_utility, break_benefit, recommended_action, "
-            "recommended_break_minutes, next_break_eta, confidence, policy_source, candidate_utilities, diagnostics_json"
+            "recommended_break_minutes, next_break_eta, confidence, policy_source, "
+            "candidate_utilities, diagnostics_json"
             ") VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
             (
                 now_utc,
@@ -311,30 +383,48 @@ def _persist_prediction(db_path: Path, result: dict[str, object], now_local: dat
                 json.dumps(result.get("diagnostics") or {}, ensure_ascii=False, default=str),
             ),
         )
+        _persist_work_hold_state(conn, result, rec, now_local)
         if should_notify_break:
             minutes = result.get("recommended_break_minutes") or 10
             benefit = result.get("break_benefit") or 0
-            body = f"Пора сделать перерыв. Рекомендуемая длительность: {minutes} мин. Польза перерыва: {benefit}/10."
+            body = (
+                "Пора сделать перерыв. "
+                f"Рекомендуемая длительность: {minutes} мин. "
+                f"Польза перерыва: {benefit}/10."
+            )
             conn.execute(
-                "INSERT INTO recommendations (timestamp, recommended_action, recommended_duration, accepted) "
+                "INSERT INTO recommendations ("
+                "timestamp, recommended_action, recommended_duration, accepted"
+                ") "
                 "VALUES (?1, ?2, ?3, 0)",
                 (now_utc, result.get("recommended_action"), minutes),
             )
+            payload = json.dumps(
+                {"source": "demo_ml", "prediction": result.get("recommended_action")}
+            )
             conn.execute(
-                "INSERT INTO notifications (created_at, title, body, state, intervention_id, kind, action_payload) "
+                "INSERT INTO notifications ("
+                "created_at, title, body, state, intervention_id, kind, action_payload"
+                ") "
                 "VALUES (?1, 'AttentionOS', ?2, 'unread', NULL, 'ml_break_recommendation', ?3)",
-                (now_utc, body, json.dumps({"source": "demo_ml", "prediction": result.get("recommended_action")})),
+                (now_utc, body, payload),
             )
         elif should_notify_work:
             body = "Можно возвращаться к работе. Перерыв завершён, состояние переоценено."
+            payload = json.dumps(
+                {"source": "demo_ml", "prediction": result.get("recommended_action")}
+            )
             conn.execute(
-                "INSERT INTO notifications (created_at, title, body, state, intervention_id, kind, action_payload) "
+                "INSERT INTO notifications ("
+                "created_at, title, body, state, intervention_id, kind, action_payload"
+                ") "
                 "VALUES (?1, 'AttentionOS', ?2, 'unread', NULL, 'ml_ready_to_work', ?3)",
-                (now_utc, body, json.dumps({"source": "demo_ml", "prediction": result.get("recommended_action")})),
+                (now_utc, body, payload),
             )
         conn.commit()
     finally:
         conn.close()
+
 
 def _ensure_ml_tables(conn: sqlite3.Connection) -> None:
     conn.execute(
@@ -342,9 +432,11 @@ def _ensure_ml_tables(conn: sqlite3.Connection) -> None:
     )
     conn.execute(
         "CREATE TABLE IF NOT EXISTS ml_predictions ("
-        "id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp TEXT NOT NULL, model_version TEXT, effectiveness REAL, "
-        "decline_15m REAL, decline_30m REAL, decline_60m REAL, continue_utility REAL, best_break_utility REAL, "
-        "break_benefit REAL, recommended_action TEXT, recommended_break_minutes INTEGER, next_break_eta INTEGER, "
+        "id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp TEXT NOT NULL, "
+        "model_version TEXT, effectiveness REAL, decline_15m REAL, decline_30m REAL, "
+        "decline_60m REAL, continue_utility REAL, best_break_utility REAL, "
+        "break_benefit REAL, recommended_action TEXT, recommended_break_minutes INTEGER, "
+        "next_break_eta INTEGER, "
         "confidence REAL, policy_source TEXT, candidate_utilities TEXT, diagnostics_json TEXT)"
     )
     conn.execute(
@@ -352,20 +444,24 @@ def _ensure_ml_tables(conn: sqlite3.Connection) -> None:
         "id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp TEXT NOT NULL, recommended_action TEXT, "
         "recommended_duration INTEGER, accepted INTEGER DEFAULT 0, ignored INTEGER DEFAULT 0, "
         "started_at TEXT, completed_at TEXT, ignored_at TEXT, actual_duration REAL, "
-        "prediction_before_id INTEGER, prediction_after_id INTEGER, task_before TEXT, task_after TEXT)"
+        "prediction_before_id INTEGER, prediction_after_id INTEGER, task_before TEXT, "
+        "task_after TEXT)"
     )
     conn.execute(
         "CREATE TABLE IF NOT EXISTS recommendation_outcomes ("
-        "id INTEGER PRIMARY KEY AUTOINCREMENT, recommendation_id INTEGER, created_at TEXT NOT NULL, "
-        "action TEXT, accepted INTEGER DEFAULT 0, ignored INTEGER DEFAULT 0, planned_duration INTEGER, "
+        "id INTEGER PRIMARY KEY AUTOINCREMENT, recommendation_id INTEGER, "
+        "created_at TEXT NOT NULL, action TEXT, accepted INTEGER DEFAULT 0, "
+        "ignored INTEGER DEFAULT 0, planned_duration INTEGER, "
         "actual_duration REAL, prediction_before_id INTEGER, prediction_after_id INTEGER, "
-        "effectiveness_before REAL, effectiveness_after REAL, decline_30m_before REAL, decline_30m_after REAL, "
-        "task_before TEXT, task_after TEXT, active_minutes_during_break REAL, idle_minutes_during_break REAL, "
+        "effectiveness_before REAL, effectiveness_after REAL, decline_30m_before REAL, "
+        "decline_30m_after REAL, task_before TEXT, task_after TEXT, "
+        "active_minutes_during_break REAL, idle_minutes_during_break REAL, "
         "rest_task_minutes_during_break REAL, restful_break_score REAL)"
     )
     conn.execute(
         "CREATE TABLE IF NOT EXISTS notifications ("
-        "id INTEGER PRIMARY KEY AUTOINCREMENT, created_at TEXT NOT NULL, title TEXT NOT NULL, body TEXT NOT NULL, "
+        "id INTEGER PRIMARY KEY AUTOINCREMENT, created_at TEXT NOT NULL, "
+        "title TEXT NOT NULL, body TEXT NOT NULL, "
         "state TEXT NOT NULL, intervention_id INTEGER, kind TEXT NOT NULL, action_payload TEXT)"
     )
     _ensure_column(conn, "ml_predictions", "candidate_utilities", "TEXT")
@@ -397,6 +493,84 @@ def _previous_prediction_action(conn: sqlite3.Connection) -> str:
     return str(row[0] or "")
 
 
+def _runtime_value(conn: sqlite3.Connection, key: str) -> str | None:
+    try:
+        row = conn.execute("SELECT value FROM app_runtime_state WHERE key = ?1", (key,)).fetchone()
+    except sqlite3.Error:
+        return None
+    if row is None:
+        return None
+    return str(row[0])
+
+
+def _set_runtime_value(conn: sqlite3.Connection, key: str, value: str) -> None:
+    conn.execute(
+        "INSERT INTO app_runtime_state (key, value) VALUES (?1, ?2) "
+        "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+        (key, value),
+    )
+
+
+def _persist_work_hold_state(
+    conn: sqlite3.Connection,
+    result: dict[str, object],
+    recommendation: dict[str, object],
+    now_local: datetime,
+) -> None:
+    if result.get("state") == "BREAK_RECOMMENDED":
+        conn.execute("DELETE FROM app_runtime_state WHERE key = 'work_hold_until'")
+        return
+    if result.get("state") != "WORK" or result.get("recommended_action") != "CONTINUE":
+        return
+    reason = str(recommendation.get("reason") or "")
+    if reason.startswith(("work_hysteresis", "post_break_grace", "fresh_tracking_start")):
+        return
+    now_utc = now_local.astimezone(UTC)
+    current_until = _parse_runtime_utc(_runtime_value(conn, "work_hold_until") or "")
+    if current_until is not None and current_until > now_utc:
+        return
+    hold_minutes = _work_hold_minutes(result.get("next_break_eta_minutes"))
+    until = now_utc + timedelta(minutes=hold_minutes)
+    _set_runtime_value(
+        conn,
+        "work_hold_until",
+        until.replace(tzinfo=None).isoformat(sep=" "),
+    )
+
+
+def _work_hold_minutes(next_break_eta: object) -> int:
+    try:
+        eta_minutes = int(next_break_eta or 0)
+    except (TypeError, ValueError):
+        eta_minutes = 0
+    settings_interval_minutes = max(_runtime_check_interval_seconds() // 60, 1)
+    return max(
+        eta_minutes,
+        settings_interval_minutes,
+        MIN_WORK_RECOMMENDATION_HOLD_MINUTES,
+    )
+
+
+def _notification_cooldown_minutes() -> int:
+    try:
+        from attentionos.settings import SettingsStore
+
+        settings = SettingsStore(get_config().data_dir / "settings.json").load()
+        return int(max(settings.notifications.minimum_interval_minutes, 5))
+    except Exception:
+        return int(get_config().intervention.cooldown_minutes)
+
+
+def _runtime_check_interval_seconds() -> int:
+    try:
+        from attentionos.settings import SettingsStore
+
+        settings = SettingsStore(get_config().data_dir / "settings.json").load()
+        return int(min(max(settings.notifications.live_check_interval_seconds, 60), 1800))
+    except Exception:
+        return INFERENCE_INTERVAL_SECONDS
+
+
 def _break_notification_in_cooldown(
     conn: sqlite3.Connection,
     now_utc: str,
@@ -411,7 +585,9 @@ def _notification_in_cooldown(
     now_utc: str,
     cooldown_minutes: int,
 ) -> bool:
-    since = datetime.fromisoformat(now_utc).replace(tzinfo=timezone.utc) - timedelta(minutes=cooldown_minutes)
+    since = datetime.fromisoformat(now_utc).replace(tzinfo=UTC) - timedelta(
+        minutes=cooldown_minutes
+    )
     row = conn.execute(
         "SELECT 1 FROM notifications "
         "WHERE kind = ?1 AND created_at >= ?2 "
@@ -422,12 +598,12 @@ def _notification_in_cooldown(
 
 
 def _break_recommendation_ignored(conn: sqlite3.Connection, now_utc: str) -> bool:
-    row = conn.execute("SELECT value FROM app_runtime_state WHERE key = 'break_ignore_until'").fetchone()
-    if row is None:
+    value = _runtime_value(conn, "break_ignore_until")
+    if value is None:
         return False
     try:
-        until = datetime.fromisoformat(str(row[0])).replace(tzinfo=timezone.utc)
-        now = datetime.fromisoformat(now_utc).replace(tzinfo=timezone.utc)
+        until = datetime.fromisoformat(value).replace(tzinfo=UTC)
+        now = datetime.fromisoformat(now_utc).replace(tzinfo=UTC)
     except ValueError:
         return False
     return now < until
@@ -443,36 +619,124 @@ def _active_break_lock(
     conn = sqlite3.connect(db_path)
     try:
         _ensure_ml_tables(conn)
+        runtime_state = _runtime_value(conn, "break_state")
+        planned_until = _runtime_value(conn, "break_planned_until")
+        if runtime_state == "BREAK" and planned_until:
+            until_utc = _parse_runtime_utc(planned_until)
+            if until_utc is not None:
+                now_utc = now_local.astimezone(UTC)
+                if now_utc < until_utc:
+                    remaining = max(int((until_utc - now_utc).total_seconds() // 60), 1)
+                    return {
+                        "state": "BREAK",
+                        "action": f"BREAK_{remaining}",
+                        "minutes": remaining,
+                        "benefit": 7.0,
+                        "until_local": until_utc.astimezone(now_local.tzinfo).strftime("%H:%M"),
+                    }
         if tracking_started_at is None:
             row = conn.execute(
                 "SELECT timestamp, recommended_action, recommended_duration FROM recommendations "
-                "WHERE recommended_action LIKE 'BREAK_%' AND COALESCE(ignored, 0) = 0 ORDER BY id DESC LIMIT 1"
+                "WHERE recommended_action LIKE 'BREAK_%' AND COALESCE(ignored, 0) = 0 "
+                "AND COALESCE(accepted, 0) = 0 AND completed_at IS NULL ORDER BY id DESC LIMIT 1"
             ).fetchone()
         else:
             row = conn.execute(
                 "SELECT timestamp, recommended_action, recommended_duration FROM recommendations "
-                "WHERE recommended_action LIKE 'BREAK_%' AND COALESCE(ignored, 0) = 0 AND timestamp >= ?1 ORDER BY id DESC LIMIT 1",
+                "WHERE recommended_action LIKE 'BREAK_%' AND COALESCE(ignored, 0) = 0 "
+                "AND COALESCE(accepted, 0) = 0 AND completed_at IS NULL AND timestamp >= ?1 "
+                "ORDER BY id DESC LIMIT 1",
                 (tracking_started_at.replace(tzinfo=None).isoformat(sep=" "),),
             ).fetchone()
     finally:
         conn.close()
     if row is None:
         return None
-    created_utc = datetime.fromisoformat(str(row[0])).replace(tzinfo=timezone.utc)
+    created_utc = datetime.fromisoformat(str(row[0])).replace(tzinfo=UTC)
     minutes = int(row[2] or 0)
     if minutes <= 0:
         return None
     until_utc = created_utc + timedelta(minutes=minutes)
-    now_utc = now_local.astimezone(timezone.utc)
+    now_utc = now_local.astimezone(UTC)
     if now_utc >= until_utc:
         return None
     action = str(row[1] or f"BREAK_{minutes}")
     return {
+        "state": "BREAK_RECOMMENDED",
         "action": action,
         "minutes": minutes,
         "benefit": 7.0,
         "until_local": until_utc.astimezone(now_local.tzinfo).strftime("%H:%M"),
     }
+
+
+def _parse_runtime_utc(value: str) -> datetime | None:
+    try:
+        return datetime.fromisoformat(value).replace(tzinfo=UTC)
+    except ValueError:
+        return None
+
+
+def _active_work_hold(db_path: Path, now_local: datetime) -> dict[str, object] | None:
+    if not db_path.exists():
+        return None
+    conn = sqlite3.connect(db_path)
+    try:
+        _ensure_ml_tables(conn)
+        hold_until = _runtime_value(conn, "work_hold_until")
+    finally:
+        conn.close()
+    if hold_until is None:
+        return None
+    until = _parse_runtime_utc(hold_until)
+    if until is None:
+        return None
+    now_utc = now_local.astimezone(UTC)
+    if now_utc >= until:
+        return None
+    remaining = max(int((until - now_utc).total_seconds() // 60), 1)
+    return {
+        "remaining_minutes": remaining,
+        "until_local": until.astimezone(now_local.tzinfo).strftime("%H:%M"),
+    }
+
+
+def _post_break_work_grace(db_path: Path, now_local: datetime) -> dict[str, object] | None:
+    if not db_path.exists():
+        return None
+    conn = sqlite3.connect(db_path)
+    try:
+        _ensure_ml_tables(conn)
+        value = _runtime_value(conn, "last_meaningful_break_at")
+    finally:
+        conn.close()
+    if value is None:
+        return None
+    break_at = _parse_runtime_utc(value)
+    if break_at is None:
+        return None
+    until = break_at + timedelta(minutes=POST_BREAK_WORK_GRACE_MINUTES)
+    now_utc = now_local.astimezone(UTC)
+    if now_utc >= until:
+        return None
+    remaining = max(int((until - now_utc).total_seconds() // 60), 1)
+    return {
+        "remaining_minutes": remaining,
+        "until_local": until.astimezone(now_local.tzinfo).strftime("%H:%M"),
+    }
+
+
+def _should_override_work_hold(
+    recommendation: object,
+    decline_15m: float,
+    decline_60m: float,
+) -> bool:
+    reason = str(getattr(recommendation, "reason", ""))
+    return (
+        reason.startswith("conservative_fallback")
+        or decline_15m >= 0.74
+        or decline_60m >= 0.82
+    )
 
 
 def _tracking_started_at(db_path: Path) -> datetime | None:
@@ -490,7 +754,7 @@ def _tracking_started_at(db_path: Path) -> datetime | None:
     if row is None:
         return None
     try:
-        return datetime.fromisoformat(str(row[0])).replace(tzinfo=timezone.utc)
+        return datetime.fromisoformat(str(row[0])).replace(tzinfo=UTC)
     except ValueError:
         return None
 
@@ -498,7 +762,8 @@ def _tracking_started_at(db_path: Path) -> datetime | None:
 def _tracking_elapsed_minutes(started_at: datetime | None, now_local: datetime) -> float | None:
     if started_at is None:
         return None
-    return max((now_local.astimezone(timezone.utc) - started_at).total_seconds() / 60, 0.0)
+    return max((now_local.astimezone(UTC) - started_at).total_seconds() / 60, 0.0)
+
 
 def _show_windows_notification(title: str, body: str) -> None:
     try:
@@ -533,18 +798,22 @@ def _warmup(
         "next_break_eta_minutes": None,
         "policy_source": "WARMUP",
         "active_minutes": telemetry_minutes,
-        "telemetry_available_minutes": diagnostics.get("telemetry_available_minutes", telemetry_minutes),
+        "telemetry_available_minutes": diagnostics.get(
+            "telemetry_available_minutes",
+            telemetry_minutes,
+        ),
         "latency_ms": round((time.perf_counter() - started) * 1000, 2),
         "diagnostics": diagnostics,
     }
 
 
 def _diagnostics(now_local: datetime, db_path: Path) -> dict[str, object]:
+    interval_seconds = _runtime_check_interval_seconds()
     return {
         "model_loaded": False,
         "model_version": None,
         "last_inference_at": now_local.isoformat(),
-        "next_inference_at": (now_local + timedelta(seconds=INFERENCE_INTERVAL_SECONDS)).isoformat(),
+        "next_inference_at": (now_local + timedelta(seconds=interval_seconds)).isoformat(),
         "telemetry_available_minutes": 0.0,
         "feature_rows_available": 0,
         "feature_vector_valid": False,
@@ -598,7 +867,14 @@ def _signals(row: dict[str, object]) -> list[dict[str, object]]:
 
 def main() -> None:
     persist = "--no-persist" not in sys.argv
-    print(json.dumps(run_demo_inference(persist=persist), indent=2, ensure_ascii=False, default=str))
+    print(
+        json.dumps(
+            run_demo_inference(persist=persist),
+            indent=2,
+            ensure_ascii=False,
+            default=str,
+        )
+    )
 
 
 if __name__ == "__main__":

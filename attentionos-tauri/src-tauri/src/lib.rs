@@ -343,7 +343,11 @@ fn save_self_report(report: SelfReportPayload) -> Result<(), String> {
             report.effectiveness.clamp(1, 5),
             report.fatigue.clamp(1, 5),
             report.difficulty.clamp(1, 5),
-            if note.is_empty() { None } else { Some(note.to_string()) },
+            if note.is_empty() {
+                None
+            } else {
+                Some(note.to_string())
+            },
         ],
     )
     .map_err(|err| err.to_string())?;
@@ -403,9 +407,7 @@ fn get_ml_diagnostics() -> Result<MlDiagnosticsPayload, String> {
             usable_outcomes: progress.usable_outcomes,
         })
     })
-    .or_else(|_| {
-        Ok(ml_diagnostics_empty(&conn))
-    })
+    .or_else(|_| Ok(ml_diagnostics_empty(&conn)))
 }
 
 struct MlProgress {
@@ -574,14 +576,17 @@ fn deliver_latest_model_notification(app: &AppHandle) -> Result<(), String> {
     let last_id = runtime_value(&conn, "last_native_notification_id")
         .and_then(|value| value.parse::<i64>().ok())
         .unwrap_or(0);
+    let query = if runtime_value(&conn, "break_state").as_deref() == Some("BREAK") {
+        "SELECT id, title, body FROM notifications \
+         WHERE state = 'unread' AND kind LIKE 'ml_%' AND kind != 'ml_break_recommendation' AND id > ?1 \
+         ORDER BY id DESC LIMIT 1"
+    } else {
+        "SELECT id, title, body FROM notifications \
+         WHERE state = 'unread' AND kind LIKE 'ml_%' AND id > ?1 \
+         ORDER BY id DESC LIMIT 1"
+    };
     let rows = {
-        let mut stmt = conn
-            .prepare(
-                "SELECT id, title, body FROM notifications \
-                 WHERE state = 'unread' AND kind LIKE 'ml_%' AND id > ?1 \
-                 ORDER BY id ASC LIMIT 5",
-            )
-            .map_err(|err| err.to_string())?;
+        let mut stmt = conn.prepare(query).map_err(|err| err.to_string())?;
         let rows = stmt
             .query_map(params![last_id], |row| {
                 Ok((
@@ -745,8 +750,9 @@ fn get_latest_demo_ml_prediction() -> Result<serde_json::Value, String> {
             prediction["recommendation"]["action"] = serde_json::json!(format!("BREAK_{minutes}"));
             prediction["recommendation"]["state"] = serde_json::json!("BREAK");
             prediction["recommendation"]["title"] = serde_json::json!("Break in progress");
-            prediction["recommendation"]["reason"] =
-                serde_json::json!("break_timer: recommendation is locked until the planned break ends.");
+            prediction["recommendation"]["reason"] = serde_json::json!(
+                "break_timer: recommendation is locked until the planned break ends."
+            );
             prediction["recommendation"]["recommended_break_minutes"] = serde_json::json!(minutes);
             prediction["recommendation"]["policy_source"] = serde_json::json!("FALLBACK");
         }
@@ -806,7 +812,9 @@ fn create_test_notification() -> Result<NotificationPayload, String> {
 
 #[tauri::command]
 fn start_break(minutes: Option<i64>) -> Result<BreakStatePayload, String> {
-    let planned = minutes.unwrap_or_else(latest_recommended_break_minutes).clamp(1, 180);
+    let planned = minutes
+        .unwrap_or_else(latest_recommended_break_minutes)
+        .clamp(1, 180);
     let db_path = attentionos_db_path()?;
     let conn = Connection::open(db_path).map_err(|err| err.to_string())?;
     ensure_runtime_state(&conn)?;
@@ -839,6 +847,7 @@ fn start_break(minutes: Option<i64>) -> Result<BreakStatePayload, String> {
     )
     .map_err(|err| err.to_string())?;
     set_runtime_value(&conn, "break_ready_notified_for", "")?;
+    mark_break_notifications_read(&conn)?;
     let updated = conn
         .execute(
             "UPDATE recommendations SET accepted = 1, started_at = ?1, recommended_duration = ?2, \
@@ -878,6 +887,7 @@ fn ignore_break() -> Result<BreakStatePayload, String> {
     if let Some(id) = recommendation_id {
         persist_recommendation_outcome(&conn, id, false, true)?;
     }
+    mark_break_notifications_read(&conn)?;
     conn.execute(
         "INSERT INTO app_runtime_state (key, value) VALUES (?1, ?2) \
          ON CONFLICT(key) DO UPDATE SET value=excluded.value",
@@ -903,10 +913,7 @@ fn finish_break() -> Result<BreakStatePayload, String> {
     get_break_state()
 }
 
-fn complete_break_in_conn(
-    conn: &Connection,
-    now: chrono::NaiveDateTime,
-) -> Result<(), String> {
+fn complete_break_in_conn(conn: &Connection, now: chrono::NaiveDateTime) -> Result<(), String> {
     let started = runtime_value(conn, "break_started_at")
         .and_then(|value| parse_sqlite_time_utc(&value).ok());
     let actual = started
@@ -1183,6 +1190,16 @@ fn insert_app_notification(
     Ok(conn.last_insert_rowid())
 }
 
+fn mark_break_notifications_read(conn: &Connection) -> Result<(), String> {
+    conn.execute(
+        "UPDATE notifications SET state = 'read' \
+         WHERE state = 'unread' AND kind = 'ml_break_recommendation'",
+        [],
+    )
+    .map_err(|err| err.to_string())?;
+    Ok(())
+}
+
 fn show_app_notification(app: &AppHandle, title: &str, body: &str) {
     let _ = app.notification().builder().title(title).body(body).show();
 }
@@ -1221,9 +1238,11 @@ fn latest_prediction_id(conn: &Connection) -> Option<i64> {
     if !table_exists(conn, "ml_predictions").unwrap_or(false) {
         return None;
     }
-    conn.query_row("SELECT id FROM ml_predictions ORDER BY id DESC LIMIT 1", [], |row| {
-        row.get(0)
-    })
+    conn.query_row(
+        "SELECT id FROM ml_predictions ORDER BY id DESC LIMIT 1",
+        [],
+        |row| row.get(0),
+    )
     .ok()
 }
 
@@ -1340,7 +1359,8 @@ fn recommendation_break_quality(conn: &Connection, recommendation_id: i64) -> (f
     let Some((Some(started_at), Some(completed_at), planned_duration)) = row else {
         return (0.0, 0.0, 0.0, 0.0);
     };
-    let idle_threshold_seconds = (load_runtime_settings().tracking.idle_threshold_minutes * 60) as f64;
+    let idle_threshold_seconds =
+        (load_runtime_settings().tracking.idle_threshold_minutes * 60) as f64;
     let result = conn.query_row(
         "SELECT \
          COALESCE(SUM(CASE WHEN COALESCE(idle_seconds, 0) < ?3 THEN MAX((julianday(ts_end) - julianday(ts_start)) * 1440.0, 0) ELSE 0 END), 0), \
@@ -1366,7 +1386,12 @@ fn prediction_snapshot(conn: &Connection, id: Option<i64>) -> Option<(f64, f64)>
     conn.query_row(
         "SELECT effectiveness, decline_30m FROM ml_predictions WHERE id = ?1",
         params![id],
-        |row| Ok((row.get::<_, Option<f64>>(0)?.unwrap_or(0.0), row.get::<_, Option<f64>>(1)?.unwrap_or(0.0))),
+        |row| {
+            Ok((
+                row.get::<_, Option<f64>>(0)?.unwrap_or(0.0),
+                row.get::<_, Option<f64>>(1)?.unwrap_or(0.0),
+            ))
+        },
     )
     .ok()
 }
@@ -1528,7 +1553,11 @@ fn python_collector_command() -> Result<Command, String> {
         probe.args(args);
         #[cfg(windows)]
         probe.creation_flags(CREATE_NO_WINDOW);
-        if probe.output().map(|output| output.status.success()).unwrap_or(false) {
+        if probe
+            .output()
+            .map(|output| output.status.success())
+            .unwrap_or(false)
+        {
             let mut command = Command::new(program);
             if program == "py" {
                 command.arg("-3");
@@ -1795,7 +1824,8 @@ fn build_dashboard(
         accepted_count: daily_summary_from_db.accepted_count,
         ignored_count: daily_summary_from_db.ignored_count,
         average_decline_risk: daily_summary_from_db.average_decline_risk,
-        recovered_effective_minutes_estimate: daily_summary_from_db.recovered_effective_minutes_estimate,
+        recovered_effective_minutes_estimate: daily_summary_from_db
+            .recovered_effective_minutes_estimate,
         best_period: best_work_block(&recent_sessions),
     };
     let state_label = if event_count == 0 {
@@ -1935,11 +1965,14 @@ fn clean_app_name(name: &str) -> String {
 }
 
 fn is_active_event(event: &EventRow, idle_threshold_seconds: f64) -> bool {
-    event.keyboard_events > 0 || event.mouse_events > 0 || event.idle_seconds < idle_threshold_seconds
+    event.keyboard_events > 0
+        || event.mouse_events > 0
+        || event.idle_seconds < idle_threshold_seconds
 }
 
 fn is_focus_event(event: &EventRow, idle_threshold_seconds: f64) -> bool {
-    is_active_event(event, idle_threshold_seconds) && is_productive_task(event.task_label.as_deref())
+    is_active_event(event, idle_threshold_seconds)
+        && is_productive_task(event.task_label.as_deref())
 }
 
 fn is_productive_task(task: Option<&str>) -> bool {
@@ -2008,10 +2041,7 @@ fn timeline_segments(
         };
         let kind = if is_idle { "idle" } else { "app" }.to_string();
         if let Some(last) = segments.last_mut() {
-            if last.app == app
-                && last.task == item.event.task_label
-                && last.kind == kind
-            {
+            if last.app == app && last.task == item.event.task_label && last.kind == kind {
                 last.end_minute = end;
                 last.duration_minutes = (last.end_minute - last.start_minute).max(1);
                 continue;
@@ -2029,10 +2059,7 @@ fn timeline_segments(
     segments
 }
 
-fn recent_sessions(
-    events: &[TimedEvent<'_>],
-    idle_threshold_seconds: f64,
-) -> Vec<RecentSession> {
+fn recent_sessions(events: &[TimedEvent<'_>], idle_threshold_seconds: f64) -> Vec<RecentSession> {
     let mut blocks: Vec<RecentSession> = Vec::new();
     let mut current_start = 0;
     let mut current_end = 0;
@@ -2043,10 +2070,19 @@ fn recent_sessions(
         .filter(|item| is_active_event(item.event, idle_threshold_seconds))
     {
         let task = item.event.task_label.clone();
-        let gap = if current_end == 0 { 0 } else { item.start_minute - current_end };
+        let gap = if current_end == 0 {
+            0
+        } else {
+            item.start_minute - current_end
+        };
         let should_split = current_end == 0 || current_task != task || gap > 10;
         if should_split && current_end > current_start {
-            blocks.push(work_block(current_start, current_end, current_task.clone(), &apps));
+            blocks.push(work_block(
+                current_start,
+                current_end,
+                current_task.clone(),
+                &apps,
+            ));
             apps.clear();
         }
         if should_split {
@@ -2205,7 +2241,13 @@ fn best_work_block(sessions: &[RecentSession]) -> Option<String> {
     sessions
         .iter()
         .max_by_key(|session| session.duration_minutes)
-        .map(|session| format!("{} | {}", session.time, session.task.clone().unwrap_or_else(|| "None".to_string())))
+        .map(|session| {
+            format!(
+                "{} | {}",
+                session.time,
+                session.task.clone().unwrap_or_else(|| "None".to_string())
+            )
+        })
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
