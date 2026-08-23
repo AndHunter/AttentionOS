@@ -339,7 +339,10 @@ def _persist_prediction(db_path: Path, result: dict[str, object], now_local: dat
         previous_action = _previous_prediction_action(conn)
         cooldown_minutes = _notification_cooldown_minutes()
         runtime_break_state = _runtime_value(conn, "break_state")
+        notifications_enabled = _model_notifications_enabled()
         should_notify_break = (
+            notifications_enabled
+            and
             result.get("state") == "BREAK_RECOMMENDED"
             and runtime_break_state != "BREAK"
             and not previous_action.startswith("BREAK")
@@ -347,6 +350,8 @@ def _persist_prediction(db_path: Path, result: dict[str, object], now_local: dat
             and not _break_recommendation_ignored(conn, now_utc)
         )
         should_notify_work = (
+            notifications_enabled
+            and
             result.get("state") == "WORK"
             and previous_action.startswith("BREAK")
             and result.get("recommended_action") == "CONTINUE"
@@ -511,6 +516,19 @@ def _set_runtime_value(conn: sqlite3.Connection, key: str, value: str) -> None:
     )
 
 
+def _load_runtime_settings():
+    from attentionos.settings import SettingsStore
+
+    return SettingsStore(get_config().data_dir / "settings.json").load()
+
+
+def _model_notifications_enabled() -> bool:
+    try:
+        return bool(_load_runtime_settings().notifications.break_recommendations)
+    except Exception:
+        return True
+
+
 def _persist_work_hold_state(
     conn: sqlite3.Connection,
     result: dict[str, object],
@@ -553,9 +571,7 @@ def _work_hold_minutes(next_break_eta: object) -> int:
 
 def _notification_cooldown_minutes() -> int:
     try:
-        from attentionos.settings import SettingsStore
-
-        settings = SettingsStore(get_config().data_dir / "settings.json").load()
+        settings = _load_runtime_settings()
         return int(max(settings.notifications.minimum_interval_minutes, 5))
     except Exception:
         return int(get_config().intervention.cooldown_minutes)
@@ -563,9 +579,7 @@ def _notification_cooldown_minutes() -> int:
 
 def _runtime_check_interval_seconds() -> int:
     try:
-        from attentionos.settings import SettingsStore
-
-        settings = SettingsStore(get_config().data_dir / "settings.json").load()
+        settings = _load_runtime_settings()
         return int(min(max(settings.notifications.live_check_interval_seconds, 60), 1800))
     except Exception:
         return INFERENCE_INTERVAL_SECONDS

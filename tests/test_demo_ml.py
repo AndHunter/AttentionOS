@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 
 import pandas as pd
 
@@ -283,6 +285,57 @@ def test_work_hysteresis_prediction_does_not_extend_hold(tmp_path) -> None:
     ).fetchone()[0]
     conn.close()
     assert value == original_value
+
+
+def test_disabled_break_notifications_do_not_create_alert_rows(tmp_path, monkeypatch) -> None:
+    import sqlite3
+
+    settings_path = tmp_path / "settings.json"
+    settings_path.write_text(
+        json.dumps({"notifications": {"break_recommendations": False}}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        "attentionos.ml.demo.inference.get_config",
+        lambda: SimpleNamespace(
+            data_dir=tmp_path,
+            intervention=SimpleNamespace(cooldown_minutes=30),
+        ),
+    )
+    db = tmp_path / "attentionos.db"
+    now = datetime(2026, 1, 1, 12, 10, tzinfo=UTC)
+    result = {
+        "model_version": "demo-test",
+        "state": "BREAK_RECOMMENDED",
+        "current_effectiveness": 45.0,
+        "decline_15m": 0.7,
+        "decline_30m": 0.8,
+        "decline_60m": 0.9,
+        "break_benefit": 8.0,
+        "recommended_action": "BREAK_15",
+        "recommended_break_minutes": 15,
+        "next_break_eta_minutes": 0,
+        "policy_source": "MODEL",
+        "diagnostics": {},
+        "recommendation": {
+            "continue_utility": 42.0,
+            "best_break_utility": 76.0,
+            "confidence": 0.9,
+            "utilities": {"CONTINUE": 42.0, "BREAK_15": 76.0},
+        },
+    }
+
+    db.touch()
+    _persist_prediction(db, result, now)
+
+    conn = sqlite3.connect(db)
+    prediction_count = conn.execute("SELECT COUNT(*) FROM ml_predictions").fetchone()[0]
+    notification_count = conn.execute("SELECT COUNT(*) FROM notifications").fetchone()[0]
+    recommendation_count = conn.execute("SELECT COUNT(*) FROM recommendations").fetchone()[0]
+    conn.close()
+    assert prediction_count == 1
+    assert notification_count == 0
+    assert recommendation_count == 0
 
 
 def test_ignored_break_recommendation_does_not_lock(tmp_path) -> None:

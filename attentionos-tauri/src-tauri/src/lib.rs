@@ -576,19 +576,34 @@ fn deliver_latest_model_notification(app: &AppHandle) -> Result<(), String> {
     let last_id = runtime_value(&conn, "last_native_notification_id")
         .and_then(|value| value.parse::<i64>().ok())
         .unwrap_or(0);
+    let settings = load_runtime_settings();
+    if !settings.notifications.break_recommendations || notifications_quiet_now(&settings) {
+        mark_latest_ml_notifications_seen(&conn)?;
+        return Ok(());
+    }
+    let freshness_seconds = (settings
+        .notifications
+        .live_check_interval_seconds
+        .clamp(60, 1800)
+        * 2)
+    .max(900);
+    let freshness_cutoff =
+        chrono::Utc::now().naive_utc() - chrono::Duration::seconds(freshness_seconds);
     let query = if runtime_value(&conn, "break_state").as_deref() == Some("BREAK") {
         "SELECT id, title, body FROM notifications \
          WHERE state = 'unread' AND kind LIKE 'ml_%' AND kind != 'ml_break_recommendation' AND id > ?1 \
+         AND created_at >= ?2 \
          ORDER BY id DESC LIMIT 1"
     } else {
         "SELECT id, title, body FROM notifications \
          WHERE state = 'unread' AND kind LIKE 'ml_%' AND id > ?1 \
+         AND created_at >= ?2 \
          ORDER BY id DESC LIMIT 1"
     };
     let rows = {
         let mut stmt = conn.prepare(query).map_err(|err| err.to_string())?;
         let rows = stmt
-            .query_map(params![last_id], |row| {
+            .query_map(params![last_id, freshness_cutoff.to_string()], |row| {
                 Ok((
                     row.get::<_, i64>(0)?,
                     row.get::<_, String>(1)?,
@@ -652,7 +667,9 @@ fn complete_expired_break(app: &AppHandle) -> Result<(), String> {
         "last_native_notification_id",
         &notification_id.to_string(),
     )?;
-    show_app_notification(app, "AttentionOS", &body);
+    if !notifications_quiet_now(&load_runtime_settings()) {
+        show_app_notification(app, "AttentionOS", &body);
+    }
     Ok(())
 }
 
@@ -1200,8 +1217,51 @@ fn mark_break_notifications_read(conn: &Connection) -> Result<(), String> {
     Ok(())
 }
 
+fn mark_latest_ml_notifications_seen(conn: &Connection) -> Result<(), String> {
+    let latest = conn
+        .query_row(
+            "SELECT MAX(id) FROM notifications WHERE kind LIKE 'ml_%'",
+            [],
+            |row| row.get::<_, Option<i64>>(0),
+        )
+        .unwrap_or(None);
+    if let Some(id) = latest {
+        set_runtime_value(conn, "last_native_notification_id", &id.to_string())?;
+    }
+    Ok(())
+}
+
 fn show_app_notification(app: &AppHandle, title: &str, body: &str) {
     let _ = app.notification().builder().title(title).body(body).show();
+}
+
+fn notifications_quiet_now(settings: &RuntimeSettingsPayload) -> bool {
+    let Some(start) = parse_hhmm_minutes(&settings.notifications.do_not_disturb_start) else {
+        return false;
+    };
+    let Some(end) = parse_hhmm_minutes(&settings.notifications.do_not_disturb_end) else {
+        return false;
+    };
+    if start == end {
+        return false;
+    }
+    let now = Local::now();
+    let minute = now.hour() * 60 + now.minute();
+    if start < end {
+        minute >= start && minute < end
+    } else {
+        minute >= start || minute < end
+    }
+}
+
+fn parse_hhmm_minutes(value: &str) -> Option<u32> {
+    let (hour, minute) = value.trim().split_once(':')?;
+    let hour = hour.parse::<u32>().ok()?;
+    let minute = minute.parse::<u32>().ok()?;
+    if hour > 23 || minute > 59 {
+        return None;
+    }
+    Some(hour * 60 + minute)
 }
 
 fn break_ignore_active(conn: &Connection) -> bool {

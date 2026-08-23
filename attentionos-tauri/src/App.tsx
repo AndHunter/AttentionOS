@@ -231,7 +231,6 @@ function App() {
   const [selfReportOpen, setSelfReportOpen] = useState(false)
   const [selectedSegment, setSelectedSegment] = useState<TimelineSegment | null>(null)
   const [tracking, setTracking] = useState(false)
-  const [lastToastId, setLastToastId] = useState(0)
   const [breakState, setBreakState] = useState<BreakState | null>(null)
   const [mlDiagnostics, setMlDiagnostics] = useState<MlDiagnostics | null>(null)
   const t = tx(settings)
@@ -266,18 +265,12 @@ function App() {
       try {
         const notes = await invoke<NotificationPayload[]>('get_notifications', { limit: 8 })
         setNotifications(notes)
-        const newest = notes.find((item) => item.state === 'unread')
-        if (newest && newest.id > lastToastId && !newest.kind.startsWith('ml_')) {
-          const granted = await ensureNotificationPermission()
-          if (granted) sendNotification({ title: localizeNotificationTitle(newest.title, lang(settings)), body: localizeNotificationBody(newest.body, lang(settings)) })
-          setLastToastId(newest.id)
-        }
       } catch (err) {
         setError(err instanceof Error ? err.message : String(err))
       }
     }, Math.max((settings?.notifications.live_check_interval_seconds ?? 60) * 1000, 60000))
     return () => window.clearInterval(timer)
-  }, [tracking, settings?.notifications.break_recommendations, settings?.notifications.live_check_interval_seconds, lastToastId])
+  }, [tracking, settings?.notifications.break_recommendations, settings?.notifications.live_check_interval_seconds])
   const unreadCount = notifications.filter((item) => item.state === 'unread').length
   const appColor = useMemo(() => { const map = new Map<string, string>(); dashboard?.timeline.forEach((s) => { if (!map.has(s.app)) map.set(s.app, palette[map.size % palette.length]) }); return map }, [dashboard?.timeline])
   const taskOptions = defaultTaskIds
@@ -295,7 +288,6 @@ function App() {
     setNotifications((items) => [note, ...items].slice(0, 8))
     const granted = await ensureNotificationPermission()
     if (granted) sendNotification({ title: localizeNotificationTitle(note.title, lang(settings)), body: localizeNotificationBody(note.body, lang(settings)) })
-    setLastToastId(note.id)
   }
   async function trainPersonalModel(minSamples: number) {
     return await invoke<PersonalTrainingResult>('train_personal_model', { minSamples })
