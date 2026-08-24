@@ -1,0 +1,20 @@
+<svg width="1280" height="460" viewBox="0 0 1280 460" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="AttentionOS data collection mode">
+  <rect width="1280" height="460" rx="26" fill="#FFFFFF"/>
+  <rect x="56" y="54" width="1168" height="352" rx="22" fill="#F6F7F9" stroke="#E2E5E9"/>
+  <text x="92" y="108" fill="#16181D" font-family="Segoe UI, Arial" font-size="30" font-weight="800">Data Collection Mode</text>
+  <text x="92" y="140" fill="#69707D" font-family="Segoe UI, Arial" font-size="15">The goal is reliable real-world evidence, not more assumptions.</text>
+  <g font-family="Segoe UI, Arial">
+    <rect x="92" y="190" width="250" height="132" rx="16" fill="#FFFFFF" stroke="#E2E5E9"/>
+    <text x="118" y="230" fill="#2F8F83" font-size="16" font-weight="800">Use normally</text>
+    <text x="118" y="260" fill="#69707D" font-size="13">Do real work, choose the real task, do not game the model.</text>
+    <rect x="376" y="190" width="250" height="132" rx="16" fill="#FFFFFF" stroke="#E2E5E9"/>
+    <text x="402" y="230" fill="#2F8F83" font-size="16" font-weight="800">Accept or ignore</text>
+    <text x="402" y="260" fill="#69707D" font-size="13">Both decisions are logged with outcomes for later evaluation.</text>
+    <rect x="660" y="190" width="250" height="132" rx="16" fill="#FFFFFF" stroke="#E2E5E9"/>
+    <text x="686" y="230" fill="#2F8F83" font-size="16" font-weight="800">Report honestly</text>
+    <text x="686" y="260" fill="#69707D" font-size="13">Self-reports calibrate future personal models, but are optional.</text>
+    <rect x="944" y="190" width="244" height="132" rx="16" fill="#FFFFFF" stroke="#E2E5E9"/>
+    <text x="970" y="230" fill="#2F8F83" font-size="16" font-weight="800">Export safely</text>
+    <text x="970" y="260" fill="#69707D" font-size="13">CSV + metadata include real outcomes only, never synthetic rows.</text>
+  </g>
+</svg>

@@ -1,0 +1,42 @@
+<svg width="1280" height="420" viewBox="0 0 1280 420" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="AttentionOS feedback loop">
+  <rect width="1280" height="420" rx="26" fill="#F6F7F9"/>
+  <text x="64" y="70" fill="#16181D" font-family="Segoe UI, Arial" font-size="30" font-weight="800">OBSERVE -> MODEL STATE -> PREDICT DECLINE -> CHOOSE ACTION -> OBSERVE OUTCOME</text>
+  <g font-family="Segoe UI, Arial">
+    <g>
+      <rect x="64" y="126" width="170" height="150" rx="16" fill="#FFFFFF" stroke="#E2E5E9"/>
+      <text x="88" y="166" fill="#69707D" font-size="12" font-weight="700">01</text>
+      <text x="88" y="198" fill="#16181D" font-size="20" font-weight="800">Telemetry</text>
+      <text x="88" y="228" fill="#69707D" font-size="13">Apps, idle, aggregate input</text>
+    </g>
+    <path d="M244 202H302" stroke="#B8C1CC" stroke-width="3" stroke-linecap="round"/>
+    <g>
+      <rect x="312" y="126" width="170" height="150" rx="16" fill="#FFFFFF" stroke="#E2E5E9"/>
+      <text x="336" y="166" fill="#69707D" font-size="12" font-weight="700">02</text>
+      <text x="336" y="198" fill="#16181D" font-size="20" font-weight="800">SQLite</text>
+      <text x="336" y="228" fill="#69707D" font-size="13">Local durable storage</text>
+    </g>
+    <path d="M492 202H550" stroke="#B8C1CC" stroke-width="3" stroke-linecap="round"/>
+    <g>
+      <rect x="560" y="126" width="170" height="150" rx="16" fill="#FFFFFF" stroke="#E2E5E9"/>
+      <text x="584" y="166" fill="#69707D" font-size="12" font-weight="700">03</text>
+      <text x="584" y="198" fill="#16181D" font-size="20" font-weight="800">Features v1</text>
+      <text x="584" y="228" fill="#69707D" font-size="13">Rolling windows and trends</text>
+    </g>
+    <path d="M740 202H798" stroke="#B8C1CC" stroke-width="3" stroke-linecap="round"/>
+    <g>
+      <rect x="808" y="126" width="170" height="150" rx="16" fill="#FFFFFF" stroke="#E2E5E9"/>
+      <text x="832" y="166" fill="#69707D" font-size="12" font-weight="700">04</text>
+      <text x="832" y="198" fill="#16181D" font-size="20" font-weight="800">DEMO policy</text>
+      <text x="832" y="228" fill="#69707D" font-size="13">User-facing recommendation</text>
+    </g>
+    <path d="M988 202H1046" stroke="#B8C1CC" stroke-width="3" stroke-linecap="round"/>
+    <g>
+      <rect x="1056" y="126" width="160" height="150" rx="16" fill="#FFFFFF" stroke="#E2E5E9"/>
+      <text x="1080" y="166" fill="#69707D" font-size="12" font-weight="700">05</text>
+      <text x="1080" y="198" fill="#16181D" font-size="20" font-weight="800">Outcome</text>
+      <text x="1080" y="228" fill="#69707D" font-size="13">+15 / +30 / +60 min</text>
+    </g>
+  </g>
+  <rect x="64" y="318" width="1152" height="46" rx="14" fill="#EAF5F2" stroke="#C8E4DE"/>
+  <text x="88" y="347" fill="#2F8F83" font-family="Segoe UI, Arial" font-size="15" font-weight="700">Personal model runs in SHADOW mode only. It is evaluated against DEMO before any future activation decision.</text>
+</svg>

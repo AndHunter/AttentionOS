@@ -11,7 +11,7 @@ from datetime import UTC, datetime
 
 from sqlalchemy import inspect, text
 
-CURRENT_SCHEMA_VERSION = 3
+CURRENT_SCHEMA_VERSION = 4
 
 
 def run_migrations(engine) -> None:
@@ -37,6 +37,7 @@ def _ensure_self_report_columns(engine) -> None:
         "task_name": "VARCHAR(64)",
         "telemetry_window_start": "DATETIME",
         "telemetry_window_end": "DATETIME",
+        "prompt_reason": "VARCHAR(32) NOT NULL DEFAULT 'MANUAL'",
     }
     _add_missing_columns(engine, "self_reports", columns, additions)
 

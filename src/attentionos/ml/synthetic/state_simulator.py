@@ -9,16 +9,64 @@ import numpy as np
 
 from attentionos.ml.synthetic.user_profiles import SyntheticUserProfile
 
-
-TASKS = ["coding", "ml", "math", "reading", "writing", "communication", "gaming", "other"]
+TASKS = [
+    "work",
+    "study",
+    "coding",
+    "ml",
+    "math",
+    "science",
+    "english",
+    "reading",
+    "writing",
+    "research",
+    "creative",
+    "communication",
+    "admin",
+    "gaming",
+    "rest",
+    "other",
+]
+TASK_WEIGHTS = np.array(
+    [
+        0.12,
+        0.11,
+        0.12,
+        0.1,
+        0.08,
+        0.06,
+        0.08,
+        0.08,
+        0.07,
+        0.07,
+        0.05,
+        0.08,
+        0.05,
+        0.035,
+        0.015,
+        0.04,
+    ]
+)
+TASK_WEIGHTS = TASK_WEIGHTS / TASK_WEIGHTS.sum()
+START_TASKS = [task for task in TASKS if task not in {"rest", "other"}]
+START_TASK_WEIGHTS = np.array([TASK_WEIGHTS[TASKS.index(task)] for task in START_TASKS])
+START_TASK_WEIGHTS = START_TASK_WEIGHTS / START_TASK_WEIGHTS.sum()
 APPS = {
+    "work": ["Chrome.exe", "Excel.exe", "Notion.exe"],
+    "study": ["Chrome.exe", "Obsidian.exe", "PDFReader.exe"],
     "coding": ["Code.exe", "PyCharm.exe", "WindowsTerminal.exe"],
     "ml": ["Code.exe", "Jupyter.exe", "Python.exe"],
     "math": ["Obsidian.exe", "Wolfram.exe"],
+    "science": ["Chrome.exe", "Wolfram.exe", "PDFReader.exe"],
+    "english": ["Chrome.exe", "Anki.exe", "Dictionary.exe"],
     "reading": ["Chrome.exe", "Edge.exe"],
     "writing": ["Word.exe", "Obsidian.exe"],
+    "research": ["Chrome.exe", "Obsidian.exe", "PDFReader.exe"],
+    "creative": ["Figma.exe", "Photoshop.exe", "Obsidian.exe"],
     "communication": ["Telegram.exe", "Slack.exe", "Teams.exe"],
+    "admin": ["Excel.exe", "Notion.exe", "Explorer.exe"],
     "gaming": ["Steam.exe", "Game.exe"],
+    "rest": ["Spotify.exe", "YouTube.exe", "Explorer.exe"],
     "other": ["Explorer.exe", "Chrome.exe"],
 }
 
@@ -41,7 +89,7 @@ def simulate_user_day(
     reports: list[dict[str, object]] = []
     fatigue = float(np.clip(1 - profile.sleep_quality_proxy + rng.normal(0.1, 0.05), 0, 0.7))
     continuous = 0.0
-    current_task = str(rng.choice(TASKS[:-1]))
+    current_task = str(rng.choice(START_TASKS, p=START_TASK_WEIGHTS))
     current_app = str(rng.choice(APPS[current_task]))
     task_elapsed = 0.0
     report_every = max(int(rng.normal(120, 32)), 70)
@@ -78,7 +126,7 @@ def simulate_user_day(
 
         switch_prob = 0.025 + max(fatigue - profile.switch_tolerance, 0) * 0.08
         if task_elapsed > rng.normal(55, 24) or rng.random() < switch_prob:
-            current_task = str(rng.choice(TASKS, p=[0.22, 0.16, 0.1, 0.12, 0.11, 0.16, 0.04, 0.09]))
+            current_task = str(rng.choice(TASKS, p=TASK_WEIGHTS))
             current_app = str(rng.choice(APPS[current_task]))
             task_elapsed = 0.0
         elif rng.random() < switch_prob * 0.65:
@@ -119,7 +167,7 @@ def simulate_user_day(
                 "idle": 1 if is_idle else 0,
                 "keyboard_events": keyboard,
                 "mouse_events": mouse,
-                "is_distraction": 1 if current_task in {"communication", "gaming"} else 0,
+                "is_distraction": 1 if current_task in {"communication", "gaming", "rest"} else 0,
                 "latent_effectiveness": effectiveness,
                 "latent_fatigue": fatigue,
                 "continuous_work_minutes": continuous,
@@ -149,7 +197,23 @@ def _circadian_alignment(hour: float, peak: float) -> float:
 
 
 def _task_difficulty(task: str) -> float:
-    return {"math": 4.0, "ml": 4.1, "coding": 3.5, "writing": 3.1, "reading": 2.6, "communication": 2.1, "gaming": 1.8}.get(task, 2.8)
+    return {
+        "ml": 4.1,
+        "math": 4.0,
+        "science": 3.9,
+        "study": 3.6,
+        "coding": 3.5,
+        "english": 3.2,
+        "writing": 3.1,
+        "research": 3.0,
+        "creative": 2.9,
+        "work": 2.8,
+        "reading": 2.6,
+        "admin": 2.4,
+        "communication": 2.1,
+        "gaming": 1.8,
+        "rest": 1.0,
+    }.get(task, 2.8)
 
 
 def _sigmoid(value: float) -> float:

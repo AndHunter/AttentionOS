@@ -118,7 +118,7 @@
 
 .tracking-card {
   display: grid;
-  grid-template-columns: auto minmax(220px, 0.8fr) minmax(260px, 1fr) auto auto;
+  grid-template-columns: auto minmax(260px, 1fr) auto auto auto;
   gap: 12px;
   align-items: end;
   margin-bottom: 16px;
@@ -159,8 +159,7 @@
   font-weight: 700;
 }
 
-.task-select select,
-.task-add input {
+.task-select select {
   min-height: 38px;
   border: 1px solid var(--border);
   border-radius: 10px;
@@ -169,8 +168,33 @@
   padding: 8px 10px;
 }
 
-.task-add {
-  align-self: end;
+.button.rest {
+  background: var(--accent-soft);
+  border-color: color-mix(in srgb, var(--accent) 36%, var(--border));
+  color: var(--accent);
+  font-weight: 700;
+}
+
+.break-inline {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  min-height: 38px;
+  padding: 6px 8px 6px 12px;
+  border: 1px solid color-mix(in srgb, var(--accent) 36%, var(--border));
+  border-radius: 12px;
+  background: var(--accent-soft);
+}
+
+.break-inline span {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.break-inline strong {
+  color: var(--text);
+  font-size: 14px;
 }
 
 .state-card,
@@ -237,6 +261,88 @@
   line-height: 1.35;
 }
 
+.has-tooltip {
+  position: relative;
+  cursor: help;
+}
+
+.has-tooltip::before,
+.has-tooltip::after {
+  position: absolute;
+  left: 50%;
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  transition:
+    opacity 140ms ease,
+    transform 140ms ease,
+    visibility 140ms ease;
+  z-index: 120;
+}
+
+.has-tooltip::before {
+  content: "";
+  top: calc(100% + 3px);
+  width: 10px;
+  height: 10px;
+  transform: translate(-50%, -3px) rotate(45deg);
+  border-left: 1px solid var(--border);
+  border-top: 1px solid var(--border);
+  background: var(--surface);
+}
+
+.has-tooltip::after {
+  content: attr(data-tooltip);
+  top: calc(100% + 8px);
+  width: max-content;
+  max-width: min(340px, calc(100vw - 48px));
+  padding: 10px 12px;
+  transform: translate(-50%, -4px);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface);
+  box-shadow: var(--shadow);
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 650;
+  letter-spacing: 0;
+  line-height: 1.35;
+  text-align: left;
+  text-transform: none;
+  white-space: normal;
+}
+
+.has-tooltip:hover::before,
+.has-tooltip:hover::after,
+.has-tooltip:focus-visible::before,
+.has-tooltip:focus-visible::after {
+  opacity: 1;
+  visibility: visible;
+  transform: translate(-50%, 0);
+}
+
+.has-tooltip:hover::before,
+.has-tooltip:focus-visible::before {
+  transform: translate(-50%, 0) rotate(45deg);
+}
+
+.has-tooltip:not([data-tooltip])::before,
+.has-tooltip:not([data-tooltip])::after,
+.has-tooltip[data-tooltip=""]::before,
+.has-tooltip[data-tooltip=""]::after {
+  display: none;
+}
+
+.panel > .panel-header p,
+.state-card p,
+.metric-detail,
+.risk-note,
+.signal-list,
+.timeline-detail,
+.state-detail {
+  display: none;
+}
+
 .panel {
   padding: 20px;
   margin-bottom: 16px;
@@ -276,7 +382,7 @@
 .timeline-track {
   position: relative;
   height: 72px;
-  overflow: hidden;
+  overflow: visible;
   border-radius: 12px;
   background: linear-gradient(90deg, #f0f2f5, #f7f8fa);
   border: 1px solid var(--border);
@@ -298,6 +404,27 @@
   outline: 2px solid color-mix(in srgb, var(--text) 28%, transparent);
   outline-offset: 2px;
   opacity: 1;
+}
+
+.timeline-segment.idle {
+  background: repeating-linear-gradient(
+    135deg,
+    color-mix(in srgb, var(--muted) 22%, transparent),
+    color-mix(in srgb, var(--muted) 22%, transparent) 6px,
+    color-mix(in srgb, var(--muted) 10%, transparent) 6px,
+    color-mix(in srgb, var(--muted) 10%, transparent) 12px
+  );
+}
+
+.timeline-segment.break {
+  top: 8px;
+  bottom: 8px;
+  border: 1px solid color-mix(in srgb, var(--warning) 55%, var(--border));
+  background: linear-gradient(
+    90deg,
+    color-mix(in srgb, var(--warning) 42%, transparent),
+    color-mix(in srgb, var(--accent) 30%, transparent)
+  );
 }
 
 .timeline-detail {
@@ -362,6 +489,35 @@
   font-size: 18px;
 }
 
+.metric-pill.compact {
+  display: inline-grid;
+  min-height: 0;
+  min-width: 104px;
+  padding: 8px 10px;
+}
+
+.break-actions {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  margin-top: 12px;
+}
+
+.risk-note {
+  margin: 10px 0 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.daily-summary {
+  margin-top: 14px;
+}
+
+.utility-list {
+  display: grid;
+  gap: 6px;
+}
+
 .signal-list {
   display: flex;
   flex-wrap: wrap;
@@ -382,6 +538,105 @@
 .app-list {
   display: grid;
   gap: 14px;
+}
+
+.state-history-wrap {
+  display: grid;
+  gap: 10px;
+}
+
+.state-history {
+  position: relative;
+  height: 164px;
+  overflow: visible;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--surface-secondary);
+}
+
+.state-history::before {
+  content: "";
+  position: absolute;
+  inset: 16px 0 32px;
+  background: linear-gradient(to top, transparent 49%, color-mix(in srgb, var(--border) 70%, transparent) 50%, transparent 51%);
+}
+
+.state-history span,
+.state-history button {
+  all: unset;
+  position: absolute;
+  width: 7px;
+  height: 7px;
+  margin-left: -3px;
+  border-radius: 999px;
+  background: var(--accent);
+  cursor: pointer;
+}
+
+.state-history span.break,
+.state-history button.break {
+  top: 0;
+  bottom: 0;
+  width: 6px;
+  height: auto;
+  border-radius: 0;
+  background: color-mix(in srgb, var(--warning) 34%, transparent);
+}
+
+.state-history span.recommendation,
+.state-history button.recommendation,
+.state-history span.break_recommended,
+.state-history button.break_recommended {
+  width: 10px;
+  height: 10px;
+  background: var(--warning);
+  box-shadow: 0 0 0 4px color-mix(in srgb, var(--warning) 18%, transparent);
+}
+
+.state-history span.break_started,
+.state-history button.break_started,
+.state-history span.break_finished,
+.state-history button.break_finished {
+  top: 0;
+  bottom: 0;
+  width: 6px;
+  height: auto;
+  border-radius: 0;
+  background: color-mix(in srgb, var(--accent) 34%, transparent);
+}
+
+.state-history span.recommendation_ignored,
+.state-history button.recommendation_ignored {
+  width: 10px;
+  height: 10px;
+  border: 2px solid var(--warning);
+  background: var(--surface);
+}
+
+.state-history button.selected {
+  outline: 2px solid color-mix(in srgb, var(--accent) 38%, transparent);
+  outline-offset: 4px;
+}
+
+.state-history i {
+  position: absolute;
+  left: 2px;
+  bottom: -1px;
+  width: 2px;
+  background: var(--danger);
+  opacity: 0.75;
+}
+
+.state-detail {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 14px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.state-detail strong {
+  color: var(--text);
 }
 
 .bar-row > div:first-child {

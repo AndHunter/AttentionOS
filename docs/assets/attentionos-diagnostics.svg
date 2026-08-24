@@ -1,0 +1,25 @@
+<svg width="1280" height="620" viewBox="0 0 1280 620" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="AttentionOS diagnostics preview">
+  <rect width="1280" height="620" rx="26" fill="#11161B"/>
+  <rect x="52" y="46" width="1176" height="528" rx="20" fill="#171C22" stroke="#2B333C"/>
+  <text x="88" y="96" fill="#F6F7F9" font-family="Segoe UI, Arial" font-size="28" font-weight="800">Developer diagnostics</text>
+  <text x="88" y="126" fill="#9AA6B2" font-family="Segoe UI, Arial" font-size="14">Real data quality, shadow model status and pipeline freshness.</text>
+  <g font-family="Segoe UI, Arial">
+    <rect x="88" y="168" width="520" height="162" rx="14" fill="#20262D" stroke="#34404B"/>
+    <text x="112" y="204" fill="#F6F7F9" font-size="18" font-weight="800">Real data quality</text>
+    <text x="112" y="240" fill="#AAB6C2" font-size="14">Telemetry</text><text x="500" y="240" fill="#9EE0D4" font-size="14" font-weight="700">OK</text>
+    <text x="112" y="270" fill="#AAB6C2" font-size="14">Recommendations</text><text x="500" y="270" fill="#9EE0D4" font-size="14" font-weight="700">OK</text>
+    <text x="112" y="300" fill="#AAB6C2" font-size="14">Outcomes</text><text x="500" y="300" fill="#D99A32" font-size="14" font-weight="700">WARN</text>
+    <rect x="672" y="168" width="520" height="162" rx="14" fill="#20262D" stroke="#34404B"/>
+    <text x="696" y="204" fill="#F6F7F9" font-size="18" font-weight="800">Shadow model</text>
+    <text x="696" y="240" fill="#AAB6C2" font-size="14">Status</text><text x="1080" y="240" fill="#D8DEE6" font-size="14" font-weight="700">SHADOW</text>
+    <text x="696" y="270" fill="#AAB6C2" font-size="14">Training outcomes</text><text x="1080" y="270" fill="#D8DEE6" font-size="14" font-weight="700">42</text>
+    <text x="696" y="300" fill="#AAB6C2" font-size="14">Action agreement</text><text x="1080" y="300" fill="#D8DEE6" font-size="14" font-weight="700">71%</text>
+    <rect x="88" y="362" width="1104" height="150" rx="14" fill="#20262D" stroke="#34404B"/>
+    <text x="112" y="398" fill="#F6F7F9" font-size="18" font-weight="800">Pipeline freshness</text>
+    <text x="112" y="436" fill="#AAB6C2" font-size="14">Last telemetry</text><text x="360" y="436" fill="#D8DEE6" font-size="14" font-weight="700">12 sec ago</text>
+    <text x="112" y="466" fill="#AAB6C2" font-size="14">Last inference</text><text x="360" y="466" fill="#D8DEE6" font-size="14" font-weight="700">41 sec ago</text>
+    <text x="112" y="496" fill="#AAB6C2" font-size="14">Last outcome capture</text><text x="360" y="496" fill="#D8DEE6" font-size="14" font-weight="700">8 min ago</text>
+    <rect x="746" y="426" width="390" height="42" rx="12" fill="#2A241A" stroke="#5B4521"/>
+    <text x="770" y="453" fill="#F0C070" font-size="14" font-weight="700">Outcome scheduler warning is visible instead of silent failure.</text>
+  </g>
+</svg>

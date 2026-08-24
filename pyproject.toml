@@ -1,6 +1,6 @@
 [project]
 name = "attentionos"
-version = "0.1.0"
+version = "0.5.0"
 description = "Local-first personal performance modeling system for Windows"
 readme = "README.md"
 license = { text = "MIT" }

@@ -45,7 +45,7 @@ class NotificationSettings(BaseModel):
     break_recommendations: bool = True
     performance_warnings: bool = False
     minimum_interval_minutes: int = Field(default=30, ge=15, le=60)
-    live_check_interval_seconds: int = Field(default=60, ge=30, le=300)
+    live_check_interval_seconds: int = Field(default=300, ge=60, le=1800)
     do_not_disturb_start: str = "23:00"
     do_not_disturb_end: str = "08:00"
 
