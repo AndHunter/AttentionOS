@@ -341,15 +341,17 @@ def _persist_prediction(db_path: Path, result: dict[str, object], now_local: dat
         cooldown_minutes = _notification_cooldown_minutes()
         runtime_break_state = _runtime_value(conn, "break_state")
         notifications_enabled = _model_notifications_enabled()
-        should_notify_break = (
-            notifications_enabled
-            and
+        should_persist_break = (
             result.get("state") == "BREAK_RECOMMENDED"
             and runtime_break_state != "BREAK"
             and not previous_action.startswith("BREAK")
             and not _pending_break_recommendation_exists(conn, now_utc)
-            and not _break_notification_in_cooldown(conn, now_utc, cooldown_minutes)
             and not _break_recommendation_ignored(conn, now_utc)
+        )
+        should_notify_break = (
+            notifications_enabled
+            and should_persist_break
+            and not _break_notification_in_cooldown(conn, now_utc, cooldown_minutes)
         )
         should_notify_work = (
             notifications_enabled
@@ -390,24 +392,54 @@ def _persist_prediction(db_path: Path, result: dict[str, object], now_local: dat
                 json.dumps(result.get("diagnostics") or {}, ensure_ascii=False, default=str),
             ),
         )
+        prediction_id = int(conn.execute("SELECT last_insert_rowid()").fetchone()[0])
         _persist_work_hold_state(conn, result, rec, now_local)
+        recommendation_id: int | None = None
+        if should_persist_break:
+            minutes = result.get("recommended_break_minutes") or 10
+            benefit = result.get("break_benefit") or 0
+            task = _current_task_label()
+            task_category = _task_category(task)
+            conn.execute(
+                "INSERT INTO recommendations ("
+                "timestamp, created_at, model_version, policy_source, recommended_action, "
+                "recommended_duration, recommended_break_minutes, accepted, ignored, "
+                "prediction_before_id, task_before, task_id, task_category, effectiveness_before, "
+                "decline_15, decline_30, decline_60, break_benefit"
+                ") "
+                "VALUES (?1, ?1, ?2, ?3, ?4, ?5, ?5, 0, 0, ?6, ?7, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+                (
+                    now_utc,
+                    result.get("model_version"),
+                    result.get("policy_source"),
+                    result.get("recommended_action"),
+                    minutes,
+                    prediction_id,
+                    task,
+                    task_category,
+                    result.get("current_effectiveness"),
+                    result.get("decline_15m"),
+                    result.get("decline_30m"),
+                    result.get("decline_60m"),
+                    benefit,
+                ),
+            )
+            recommendation_id = int(conn.execute("SELECT last_insert_rowid()").fetchone()[0])
         if should_notify_break:
             minutes = result.get("recommended_break_minutes") or 10
             benefit = result.get("break_benefit") or 0
+            local_time = now_local.strftime("%H:%M")
             body = (
-                "Пора сделать перерыв. "
-                f"Рекомендуемая длительность: {minutes} мин. "
+                f"{local_time} - Рекомендуется перерыв: {minutes} мин. "
+                f"Риск снижения: {round(float(result.get('decline_30m') or 0) * 100)}%. "
                 f"Польза перерыва: {benefit}/10."
             )
-            conn.execute(
-                "INSERT INTO recommendations ("
-                "timestamp, recommended_action, recommended_duration, accepted"
-                ") "
-                "VALUES (?1, ?2, ?3, 0)",
-                (now_utc, result.get("recommended_action"), minutes),
-            )
             payload = json.dumps(
-                {"source": "demo_ml", "prediction": result.get("recommended_action")}
+                {
+                    "source": "demo_ml",
+                    "prediction": result.get("recommended_action"),
+                    "recommendation_id": recommendation_id,
+                }
             )
             conn.execute(
                 "INSERT INTO notifications ("
@@ -417,7 +449,8 @@ def _persist_prediction(db_path: Path, result: dict[str, object], now_local: dat
                 (now_utc, body, payload),
             )
         elif should_notify_work:
-            body = "Можно возвращаться к работе. Перерыв завершён, состояние переоценено."
+            local_time = now_local.strftime("%H:%M")
+            body = f"{local_time} - Перерыв завершён. Можно возвращаться к работе."
             payload = json.dumps(
                 {"source": "demo_ml", "prediction": result.get("recommended_action")}
             )
@@ -466,6 +499,18 @@ def _ensure_ml_tables(conn: sqlite3.Connection) -> None:
         "rest_task_minutes_during_break REAL, restful_break_score REAL)"
     )
     conn.execute(
+        "CREATE TABLE IF NOT EXISTS action_outcomes ("
+        "id INTEGER PRIMARY KEY AUTOINCREMENT, recommendation_id INTEGER NOT NULL, action TEXT NOT NULL, "
+        "captured_at TEXT NOT NULL, prediction_after_id INTEGER, effectiveness_after REAL, "
+        "decline_15_after REAL, decline_30_after REAL, decline_60_after REAL, "
+        "active_ratio_after REAL, switch_rate_after REAL, input_rate_after REAL, idle_ratio_after REAL, "
+        "task_after TEXT, minutes_since_action INTEGER NOT NULL)"
+    )
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS ux_action_outcomes_recommendation_horizon "
+        "ON action_outcomes(recommendation_id, minutes_since_action)"
+    )
+    conn.execute(
         "CREATE TABLE IF NOT EXISTS notifications ("
         "id INTEGER PRIMARY KEY AUTOINCREMENT, created_at TEXT NOT NULL, "
         "title TEXT NOT NULL, body TEXT NOT NULL, "
@@ -479,6 +524,24 @@ def _ensure_ml_tables(conn: sqlite3.Connection) -> None:
     _ensure_column(conn, "recommendations", "prediction_after_id", "INTEGER")
     _ensure_column(conn, "recommendations", "task_before", "TEXT")
     _ensure_column(conn, "recommendations", "task_after", "TEXT")
+    _ensure_column(conn, "recommendations", "created_at", "TEXT")
+    _ensure_column(conn, "recommendations", "model_version", "TEXT")
+    _ensure_column(conn, "recommendations", "policy_source", "TEXT")
+    _ensure_column(conn, "recommendations", "recommended_break_minutes", "INTEGER")
+    _ensure_column(conn, "recommendations", "decline_15", "REAL")
+    _ensure_column(conn, "recommendations", "decline_30", "REAL")
+    _ensure_column(conn, "recommendations", "decline_60", "REAL")
+    _ensure_column(conn, "recommendations", "effectiveness_before", "REAL")
+    _ensure_column(conn, "recommendations", "break_benefit", "REAL")
+    _ensure_column(conn, "recommendations", "break_started_at", "TEXT")
+    _ensure_column(conn, "recommendations", "break_finished_at", "TEXT")
+    _ensure_column(conn, "recommendations", "actual_break_seconds", "INTEGER")
+    _ensure_column(conn, "recommendations", "task_id", "TEXT")
+    _ensure_column(conn, "recommendations", "task_category", "TEXT")
+    conn.execute("UPDATE recommendations SET created_at = COALESCE(created_at, timestamp)")
+    conn.execute(
+        "UPDATE recommendations SET recommended_break_minutes = COALESCE(recommended_break_minutes, recommended_duration)"
+    )
     _ensure_column(conn, "recommendation_outcomes", "active_minutes_during_break", "REAL")
     _ensure_column(conn, "recommendation_outcomes", "idle_minutes_during_break", "REAL")
     _ensure_column(conn, "recommendation_outcomes", "rest_task_minutes_during_break", "REAL")
@@ -522,6 +585,64 @@ def _load_runtime_settings():
     from attentionos.settings import SettingsStore
 
     return SettingsStore(get_config().data_dir / "settings.json").load()
+
+
+def _current_task_label() -> str | None:
+    try:
+        task = str(_load_runtime_settings().preferences.current_task_label or "").strip()
+    except Exception:
+        return None
+    if not task or task.lower() == "none":
+        return None
+    return task
+
+
+def _task_category(task: str | None) -> str | None:
+    if task is None:
+        return None
+    value = task.strip().lower()
+    if not value or value == "none":
+        return None
+    mapping = {
+        "homework": "study",
+        "school": "study",
+        "physics": "science",
+        "chemistry": "science",
+        "biology": "science",
+        "language": "english",
+        "planning": "admin",
+        "работа": "work",
+        "учёба": "study",
+        "учеба": "study",
+        "уроки": "study",
+        "домашка": "study",
+        "программирование": "coding",
+        "математика": "math",
+        "английский": "english",
+        "отдых": "rest",
+        "игра": "gaming",
+        "другое": "other",
+    }
+    known = {
+        "work",
+        "study",
+        "coding",
+        "ml",
+        "math",
+        "science",
+        "english",
+        "reading",
+        "writing",
+        "research",
+        "creative",
+        "communication",
+        "admin",
+        "gaming",
+        "rest",
+        "other",
+    }
+    normalized = mapping.get(value, value)
+    return normalized if normalized in known else "other"
 
 
 def _model_notifications_enabled() -> bool:

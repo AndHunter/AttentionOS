@@ -388,7 +388,7 @@ def test_disabled_break_notifications_do_not_create_alert_rows(tmp_path, monkeyp
     conn.close()
     assert prediction_count == 1
     assert notification_count == 0
-    assert recommendation_count == 0
+    assert recommendation_count == 1
 
 
 def test_ignored_break_recommendation_does_not_lock(tmp_path) -> None:
@@ -450,7 +450,56 @@ def test_persist_prediction_stores_utilities_and_diagnostics(tmp_path) -> None:
     assert "feature_rows_available" in row[1]
 
 
-def test_ml_tables_include_recommendation_outcomes(tmp_path) -> None:
+def test_persist_prediction_logs_recommendation_metadata(tmp_path) -> None:
+    import sqlite3
+
+    db = tmp_path / "attentionos.db"
+    now = datetime(2026, 1, 1, 12, 10, tzinfo=UTC)
+    result = {
+        "model_version": "demo-test",
+        "state": "BREAK_RECOMMENDED",
+        "current_effectiveness": 41.0,
+        "decline_15m": 0.61,
+        "decline_30m": 0.72,
+        "decline_60m": 0.84,
+        "break_benefit": 8.1,
+        "recommended_action": "BREAK_15",
+        "recommended_break_minutes": 15,
+        "next_break_eta_minutes": 0,
+        "policy_source": "MODEL",
+        "diagnostics": {"feature_rows_available": 120},
+        "recommendation": {
+            "continue_utility": 40.0,
+            "best_break_utility": 78.0,
+            "confidence": 0.9,
+            "utilities": {"CONTINUE": 40.0, "BREAK_15": 78.0},
+        },
+    }
+
+    db.touch()
+    _persist_prediction(db, result, now)
+
+    conn = sqlite3.connect(db)
+    row = conn.execute(
+        "SELECT created_at, model_version, policy_source, recommended_break_minutes, "
+        "decline_15, decline_30, decline_60, effectiveness_before, break_benefit "
+        "FROM recommendations ORDER BY id DESC LIMIT 1"
+    ).fetchone()
+    conn.close()
+
+    assert row is not None
+    assert row[0] is not None
+    assert row[1] == "demo-test"
+    assert row[2] == "MODEL"
+    assert row[3] == 15
+    assert row[4] == 0.61
+    assert row[5] == 0.72
+    assert row[6] == 0.84
+    assert row[7] == 41.0
+    assert row[8] == 8.1
+
+
+def test_ml_tables_include_recommendation_and_action_outcomes(tmp_path) -> None:
     import sqlite3
 
     db = tmp_path / "attentionos.db"
@@ -466,6 +515,17 @@ def test_ml_tables_include_recommendation_outcomes(tmp_path) -> None:
         row[1]
         for row in conn.execute("PRAGMA table_info(recommendation_outcomes)").fetchall()
     }
+    recommendation_columns = {
+        row[1]
+        for row in conn.execute("PRAGMA table_info(recommendations)").fetchall()
+    }
+    action_columns = {
+        row[1]
+        for row in conn.execute("PRAGMA table_info(action_outcomes)").fetchall()
+    }
     conn.close()
     assert "recommendation_outcomes" in tables
+    assert "action_outcomes" in tables
     assert {"recommendation_id", "effectiveness_before", "effectiveness_after"} <= columns
+    assert {"created_at", "decline_15", "decline_30", "decline_60", "task_category"} <= recommendation_columns
+    assert {"recommendation_id", "minutes_since_action", "active_ratio_after"} <= action_columns

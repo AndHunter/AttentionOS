@@ -25,6 +25,15 @@ const CREATE_NO_WINDOW: u32 = 0x08000000;
 const MAX_EVENT_DURATION_SECONDS: i64 = 15;
 const TIMELINE_GAP_IDLE_MINUTES: i64 = 5;
 const MIN_FOCUS_BLOCK_SECONDS: i64 = 60;
+const OUTCOME_CAPTURE_INTERVAL_SECONDS: u64 = 60;
+const OUTCOME_HORIZONS_MINUTES: [i64; 3] = [15, 30, 60];
+const SELF_REPORT_SCHEDULER_INTERVAL_SECONDS: u64 = 300;
+const MIN_REPORT_INTERVAL_MINUTES: i64 = 45;
+const POST_BREAK_REPORT_DELAY_MINUTES: i64 = 15;
+const PERSONALIZATION_EXPERIMENTAL_OUTCOMES: i64 = 30;
+const PERSONALIZATION_EARLY_OUTCOMES: i64 = 50;
+const PERSONALIZATION_TARGET_OUTCOMES: i64 = 100;
+const SQLITE_SCHEMA_VERSION: i64 = 4;
 
 struct CollectorProcess {
     child: Mutex<Option<Child>>,
@@ -42,6 +51,7 @@ struct TimelineSegment {
     app: String,
     task: Option<String>,
     kind: String,
+    state: String,
     start_minute: i64,
     end_minute: i64,
     duration_minutes: i64,
@@ -76,12 +86,19 @@ struct StatePoint {
 struct DailySummaryPayload {
     work_minutes: i64,
     effective_minutes_estimate: i64,
+    average_effectiveness: Option<f64>,
     break_count: i64,
     recommendation_count: i64,
     accepted_count: i64,
     ignored_count: i64,
+    average_break_minutes: Option<f64>,
+    break_effectiveness_delta: Option<f64>,
     average_decline_risk: f64,
     recovered_effective_minutes_estimate: i64,
+    recovered_effective_minutes_available: bool,
+    personalization_samples_today: i64,
+    acceptance_rate: Option<f64>,
+    completion_rate: Option<f64>,
     best_period: Option<String>,
 }
 
@@ -139,6 +156,15 @@ struct MlDiagnosticsPayload {
     policy_source: Option<String>,
     candidate_utilities: serde_json::Value,
     diagnostics: serde_json::Value,
+    current_state: Option<String>,
+    latest_recommendation_id: Option<i64>,
+    selected_action: Option<String>,
+    latest_recommendation_accepted: Option<bool>,
+    latest_recommendation_ignored: Option<bool>,
+    pending_outcome_captures: i64,
+    self_report_next_eligible_at: Option<String>,
+    personalization_progress: i64,
+    personal_model_status: String,
     real_telemetry_hours: f64,
     self_reports: i64,
     recommendations: i64,
@@ -235,6 +261,27 @@ struct EventRow {
     task_label: Option<String>,
 }
 
+#[derive(Debug, Clone)]
+struct PredictionSnapshot {
+    id: i64,
+    model_version: Option<String>,
+    policy_source: Option<String>,
+    effectiveness: f64,
+    decline_15: f64,
+    decline_30: f64,
+    decline_60: f64,
+    break_benefit: f64,
+}
+
+#[derive(Debug)]
+struct OutcomeWindowMetrics {
+    active_ratio: f64,
+    switch_rate: f64,
+    input_rate: f64,
+    idle_ratio: f64,
+    task_after: Option<String>,
+}
+
 #[derive(Debug)]
 struct TimedEvent<'a> {
     event: &'a EventRow,
@@ -248,6 +295,7 @@ fn get_dashboard(date: Option<String>) -> Result<DashboardPayload, String> {
     let target = date.unwrap_or_else(|| Local::now().date_naive().to_string());
     let db_path = attentionos_db_path()?;
     let conn = Connection::open(&db_path).map_err(|err| err.to_string())?;
+    ensure_runtime_state(&conn)?;
     let settings = load_runtime_settings();
     let events = load_events_for_day(&conn, &target)?
         .into_iter()
@@ -398,12 +446,24 @@ fn get_ml_diagnostics() -> Result<MlDiagnosticsPayload, String> {
         let candidate_raw: Option<String> = row.get(3)?;
         let diagnostics_raw: Option<String> = row.get(4)?;
         let progress = ml_progress(&conn);
+        let latest_recommendation = latest_recommendation_status(&conn);
         Ok(MlDiagnosticsPayload {
             last_inference_at: row.get(0)?,
             model_version: row.get(1)?,
             policy_source: row.get(2)?,
             candidate_utilities: parse_json_object(candidate_raw),
             diagnostics: parse_json_object(diagnostics_raw),
+            current_state: runtime_value(&conn, "break_state").or_else(|| Some("WORK".to_string())),
+            latest_recommendation_id: latest_recommendation.as_ref().map(|item| item.0),
+            selected_action: latest_recommendation
+                .as_ref()
+                .and_then(|item| item.1.clone()),
+            latest_recommendation_accepted: latest_recommendation.as_ref().map(|item| item.2),
+            latest_recommendation_ignored: latest_recommendation.as_ref().map(|item| item.3),
+            pending_outcome_captures: pending_outcome_capture_count(&conn).unwrap_or_default(),
+            self_report_next_eligible_at: self_report_next_eligible_at(&conn),
+            personalization_progress: personalization_progress(progress.usable_outcomes),
+            personal_model_status: personal_model_status(progress.usable_outcomes),
             real_telemetry_hours: progress.real_telemetry_hours,
             self_reports: progress.self_reports,
             recommendations: progress.recommendations,
@@ -426,12 +486,24 @@ struct MlProgress {
 
 fn ml_diagnostics_empty(conn: &Connection) -> MlDiagnosticsPayload {
     let progress = ml_progress(conn);
+    let latest_recommendation = latest_recommendation_status(conn);
     MlDiagnosticsPayload {
         last_inference_at: None,
         model_version: None,
         policy_source: None,
         candidate_utilities: serde_json::json!({}),
         diagnostics: serde_json::json!({}),
+        current_state: runtime_value(conn, "break_state").or_else(|| Some("WORK".to_string())),
+        latest_recommendation_id: latest_recommendation.as_ref().map(|item| item.0),
+        selected_action: latest_recommendation
+            .as_ref()
+            .and_then(|item| item.1.clone()),
+        latest_recommendation_accepted: latest_recommendation.as_ref().map(|item| item.2),
+        latest_recommendation_ignored: latest_recommendation.as_ref().map(|item| item.3),
+        pending_outcome_captures: pending_outcome_capture_count(conn).unwrap_or_default(),
+        self_report_next_eligible_at: self_report_next_eligible_at(conn),
+        personalization_progress: personalization_progress(progress.usable_outcomes),
+        personal_model_status: personal_model_status(progress.usable_outcomes),
         real_telemetry_hours: progress.real_telemetry_hours,
         self_reports: progress.self_reports,
         recommendations: progress.recommendations,
@@ -442,6 +514,7 @@ fn ml_diagnostics_empty(conn: &Connection) -> MlDiagnosticsPayload {
 }
 
 fn ml_progress(conn: &Connection) -> MlProgress {
+    let action_outcomes = table_count(conn, "action_outcomes");
     MlProgress {
         real_telemetry_hours: telemetry_hours(conn),
         self_reports: table_count(conn, "self_reports"),
@@ -454,8 +527,48 @@ fn ml_progress(conn: &Connection) -> MlProgress {
             conn,
             "SELECT COUNT(*) FROM recommendations WHERE COALESCE(ignored, 0) = 1",
         ),
-        usable_outcomes: table_count(conn, "recommendation_outcomes"),
+        usable_outcomes: if action_outcomes > 0 {
+            action_outcomes
+        } else {
+            table_count(conn, "recommendation_outcomes")
+        },
     }
+}
+
+fn personalization_progress(usable_outcomes: i64) -> i64 {
+    usable_outcomes.clamp(0, PERSONALIZATION_TARGET_OUTCOMES)
+}
+
+fn personal_model_status(usable_outcomes: i64) -> String {
+    if usable_outcomes >= PERSONALIZATION_TARGET_OUTCOMES {
+        "eligible".to_string()
+    } else if usable_outcomes >= PERSONALIZATION_EARLY_OUTCOMES {
+        "early_personalization".to_string()
+    } else if usable_outcomes >= PERSONALIZATION_EXPERIMENTAL_OUTCOMES {
+        "experimental".to_string()
+    } else {
+        "collecting".to_string()
+    }
+}
+
+fn latest_recommendation_status(conn: &Connection) -> Option<(i64, Option<String>, bool, bool)> {
+    if !table_exists(conn, "recommendations").unwrap_or(false) {
+        return None;
+    }
+    conn.query_row(
+        "SELECT id, recommended_action, COALESCE(accepted, 0), COALESCE(ignored, 0) \
+         FROM recommendations ORDER BY id DESC LIMIT 1",
+        [],
+        |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, Option<String>>(1)?,
+                row.get::<_, i64>(2)? == 1,
+                row.get::<_, i64>(3)? == 1,
+            ))
+        },
+    )
+    .ok()
 }
 
 fn run_demo_ml_once() -> Result<serde_json::Value, String> {
@@ -632,6 +745,24 @@ fn spawn_break_monitor(app: AppHandle) {
             eprintln!("Break monitor failed: {err}");
         }
         thread::sleep(Duration::from_secs(10));
+    });
+}
+
+fn spawn_outcome_capture_scheduler() {
+    thread::spawn(move || loop {
+        if let Err(err) = capture_pending_action_outcomes() {
+            eprintln!("Outcome capture scheduler failed: {err}");
+        }
+        thread::sleep(Duration::from_secs(OUTCOME_CAPTURE_INTERVAL_SECONDS));
+    });
+}
+
+fn spawn_self_report_scheduler(app: AppHandle) {
+    thread::spawn(move || loop {
+        if let Err(err) = maybe_prompt_self_report(&app) {
+            eprintln!("Self-report scheduler failed: {err}");
+        }
+        thread::sleep(Duration::from_secs(SELF_REPORT_SCHEDULER_INTERVAL_SECONDS));
     });
 }
 
@@ -842,7 +973,6 @@ fn start_break(minutes: Option<i64>) -> Result<BreakStatePayload, String> {
     ensure_runtime_state(&conn)?;
     let now = chrono::Utc::now().naive_utc();
     let until = now + chrono::Duration::minutes(planned);
-    let prediction_before_id = latest_prediction_id(&conn);
     let task_before = current_task_label();
     set_runtime_value(
         &conn,
@@ -870,19 +1000,57 @@ fn start_break(minutes: Option<i64>) -> Result<BreakStatePayload, String> {
     .map_err(|err| err.to_string())?;
     set_runtime_value(&conn, "break_ready_notified_for", "")?;
     mark_break_notifications_read(&conn)?;
+    let snapshot = latest_prediction_snapshot(&conn);
+    let prediction_before_id = snapshot.as_ref().map(|item| item.id);
     let updated = conn
         .execute(
-            "UPDATE recommendations SET accepted = 1, started_at = ?1, recommended_duration = ?2, \
-             prediction_before_id = COALESCE(prediction_before_id, ?3), task_before = COALESCE(task_before, ?4) \
+            "UPDATE recommendations SET accepted = 1, ignored = 0, started_at = ?1, break_started_at = ?1, \
+             recommended_duration = COALESCE(recommended_duration, ?2), recommended_break_minutes = COALESCE(recommended_break_minutes, ?2), \
+             prediction_before_id = COALESCE(prediction_before_id, ?3), task_before = COALESCE(task_before, ?4), \
+             task_id = COALESCE(task_id, ?4), task_category = COALESCE(task_category, ?5), \
+             model_version = COALESCE(model_version, ?6), policy_source = COALESCE(policy_source, ?7), \
+             effectiveness_before = COALESCE(effectiveness_before, ?8), decline_15 = COALESCE(decline_15, ?9), \
+             decline_30 = COALESCE(decline_30, ?10), decline_60 = COALESCE(decline_60, ?11), \
+             break_benefit = COALESCE(break_benefit, ?12) \
              WHERE id = (SELECT id FROM recommendations WHERE recommended_action LIKE 'BREAK_%' AND completed_at IS NULL AND COALESCE(ignored, 0) = 0 ORDER BY id DESC LIMIT 1)",
-            params![now.to_string(), planned, prediction_before_id, task_before],
+            params![
+                now.to_string(),
+                planned,
+                prediction_before_id,
+                task_before,
+                task_category_for(task_before.as_deref()),
+                snapshot.as_ref().and_then(|item| item.model_version.clone()),
+                snapshot.as_ref().and_then(|item| item.policy_source.clone()),
+                snapshot.as_ref().map(|item| item.effectiveness),
+                snapshot.as_ref().map(|item| item.decline_15),
+                snapshot.as_ref().map(|item| item.decline_30),
+                snapshot.as_ref().map(|item| item.decline_60),
+                snapshot.as_ref().map(|item| item.break_benefit),
+            ],
         )
         .map_err(|err| err.to_string())?;
     if updated == 0 {
         conn.execute(
-            "INSERT INTO recommendations (timestamp, recommended_action, recommended_duration, accepted, started_at, prediction_before_id, task_before) \
-             VALUES (?1, ?2, ?3, 1, ?1, ?4, ?5)",
-            params![now.to_string(), format!("BREAK_{planned}"), planned, prediction_before_id, task_before],
+            "INSERT INTO recommendations (timestamp, created_at, model_version, policy_source, recommended_action, \
+             recommended_duration, recommended_break_minutes, accepted, ignored, started_at, break_started_at, \
+             prediction_before_id, task_before, task_id, task_category, effectiveness_before, decline_15, decline_30, \
+             decline_60, break_benefit) \
+             VALUES (?1, ?1, ?2, ?3, ?4, ?5, ?5, 1, 0, ?1, ?1, ?6, ?7, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+            params![
+                now.to_string(),
+                snapshot.as_ref().and_then(|item| item.model_version.clone()),
+                snapshot.as_ref().and_then(|item| item.policy_source.clone()),
+                format!("BREAK_{planned}"),
+                planned,
+                prediction_before_id,
+                task_before,
+                task_category_for(task_before.as_deref()),
+                snapshot.as_ref().map(|item| item.effectiveness),
+                snapshot.as_ref().map(|item| item.decline_15),
+                snapshot.as_ref().map(|item| item.decline_30),
+                snapshot.as_ref().map(|item| item.decline_60),
+                snapshot.as_ref().map(|item| item.break_benefit),
+            ],
         )
         .map_err(|err| err.to_string())?;
     }
@@ -897,13 +1065,34 @@ fn ignore_break() -> Result<BreakStatePayload, String> {
     let settings = load_runtime_settings();
     let now = chrono::Utc::now().naive_utc();
     let until = now + chrono::Duration::minutes(settings.notifications.minimum_interval_minutes);
-    let recommendation_id = latest_break_recommendation_id(&conn);
-    let prediction_before_id = latest_prediction_id(&conn);
+    let recommendation_id = latest_actionable_break_recommendation_id(&conn)
+        .or_else(|| latest_break_recommendation_id(&conn));
+    let snapshot = latest_prediction_snapshot(&conn);
+    let prediction_before_id = snapshot.as_ref().map(|item| item.id);
     let task_before = current_task_label();
     conn.execute(
-        "UPDATE recommendations SET ignored = 1, ignored_at = ?1, prediction_before_id = COALESCE(prediction_before_id, ?2), task_before = COALESCE(task_before, ?3) \
-         WHERE id = (SELECT id FROM recommendations WHERE recommended_action LIKE 'BREAK_%' ORDER BY id DESC LIMIT 1)",
-        params![now.to_string(), prediction_before_id, task_before],
+        "UPDATE recommendations SET accepted = 0, ignored = 1, ignored_at = ?1, \
+         prediction_before_id = COALESCE(prediction_before_id, ?2), task_before = COALESCE(task_before, ?3), \
+         task_id = COALESCE(task_id, ?3), task_category = COALESCE(task_category, ?4), \
+         model_version = COALESCE(model_version, ?5), policy_source = COALESCE(policy_source, ?6), \
+         effectiveness_before = COALESCE(effectiveness_before, ?7), decline_15 = COALESCE(decline_15, ?8), \
+         decline_30 = COALESCE(decline_30, ?9), decline_60 = COALESCE(decline_60, ?10), \
+         break_benefit = COALESCE(break_benefit, ?11) \
+         WHERE id = COALESCE(?12, (SELECT id FROM recommendations WHERE recommended_action LIKE 'BREAK_%' ORDER BY id DESC LIMIT 1))",
+        params![
+            now.to_string(),
+            prediction_before_id,
+            task_before,
+            task_category_for(task_before.as_deref()),
+            snapshot.as_ref().and_then(|item| item.model_version.clone()),
+            snapshot.as_ref().and_then(|item| item.policy_source.clone()),
+            snapshot.as_ref().map(|item| item.effectiveness),
+            snapshot.as_ref().map(|item| item.decline_15),
+            snapshot.as_ref().map(|item| item.decline_30),
+            snapshot.as_ref().map(|item| item.decline_60),
+            snapshot.as_ref().map(|item| item.break_benefit),
+            recommendation_id,
+        ],
     )
     .map_err(|err| err.to_string())?;
     if let Some(id) = recommendation_id {
@@ -941,6 +1130,9 @@ fn complete_break_in_conn(conn: &Connection, now: chrono::NaiveDateTime) -> Resu
     let actual = started
         .map(|start| now.signed_duration_since(start).num_minutes().max(0))
         .unwrap_or(0);
+    let actual_seconds = started
+        .map(|start| now.signed_duration_since(start).num_seconds().max(0))
+        .unwrap_or(0);
     let recommendation_id = latest_started_recommendation_id(conn);
     let prediction_after_id = latest_prediction_id(conn);
     let restored_task = runtime_value(conn, "pre_break_task_label")
@@ -953,9 +1145,10 @@ fn complete_break_in_conn(conn: &Connection, now: chrono::NaiveDateTime) -> Resu
         .unwrap_or_else(|| "work".to_string());
     let task_after = Some(restored_task.clone());
     conn.execute(
-        "UPDATE recommendations SET completed_at = ?1, actual_duration = ?2, prediction_after_id = ?3, task_after = ?4 \
+        "UPDATE recommendations SET completed_at = ?1, break_finished_at = ?1, actual_duration = ?2, \
+         actual_break_seconds = ?5, prediction_after_id = ?3, task_after = ?4 \
          WHERE id = (SELECT id FROM recommendations WHERE started_at IS NOT NULL AND completed_at IS NULL ORDER BY id DESC LIMIT 1)",
-        params![now.to_string(), actual, prediction_after_id, task_after],
+        params![now.to_string(), actual, prediction_after_id, task_after, actual_seconds],
     )
     .map_err(|err| err.to_string())?;
     if let Some(id) = recommendation_id {
@@ -964,6 +1157,7 @@ fn complete_break_in_conn(conn: &Connection, now: chrono::NaiveDateTime) -> Resu
     set_runtime_value(conn, "break_state", "READY_TO_WORK")?;
     set_runtime_value(conn, "last_meaningful_break_at", &now.to_string())?;
     set_runtime_value(conn, "current_work_episode_started_at", &now.to_string())?;
+    set_runtime_value(conn, "ready_to_work_since", &now.to_string())?;
     set_runtime_value(conn, "pre_break_task_label", "")?;
     set_current_task_label_value(&restored_task)?;
     Ok(())
@@ -1081,8 +1275,20 @@ fn record_tracking_started() -> Result<(), String> {
 }
 
 fn ensure_runtime_state(conn: &Connection) -> Result<(), String> {
+    conn.pragma_update(None, "user_version", SQLITE_SCHEMA_VERSION)
+        .map_err(|err| err.to_string())?;
     conn.execute(
         "CREATE TABLE IF NOT EXISTS app_runtime_state (key TEXT PRIMARY KEY, value TEXT NOT NULL)",
+        [],
+    )
+    .map_err(|err| err.to_string())?;
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS ml_predictions (\
+         id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp TEXT NOT NULL, model_version TEXT, \
+         effectiveness REAL, decline_15m REAL, decline_30m REAL, decline_60m REAL, \
+         continue_utility REAL, best_break_utility REAL, break_benefit REAL, \
+         recommended_action TEXT, recommended_break_minutes INTEGER, next_break_eta INTEGER, \
+         confidence REAL, policy_source TEXT, candidate_utilities TEXT, diagnostics_json TEXT)",
         [],
     )
     .map_err(|err| err.to_string())?;
@@ -1107,6 +1313,32 @@ fn ensure_runtime_state(conn: &Connection) -> Result<(), String> {
     )
     .map_err(|err| err.to_string())?;
     conn.execute(
+        "CREATE TABLE IF NOT EXISTS action_outcomes (\
+         id INTEGER PRIMARY KEY AUTOINCREMENT, recommendation_id INTEGER NOT NULL, action TEXT NOT NULL, \
+         captured_at TEXT NOT NULL, prediction_after_id INTEGER, effectiveness_after REAL, \
+         decline_15_after REAL, decline_30_after REAL, decline_60_after REAL, \
+         active_ratio_after REAL, switch_rate_after REAL, input_rate_after REAL, idle_ratio_after REAL, \
+         task_after TEXT, minutes_since_action INTEGER NOT NULL)",
+        [],
+    )
+    .map_err(|err| err.to_string())?;
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS ux_action_outcomes_recommendation_horizon \
+         ON action_outcomes(recommendation_id, minutes_since_action)",
+        [],
+    )
+    .map_err(|err| err.to_string())?;
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_recommendations_created_at ON recommendations(created_at)",
+        [],
+    )
+    .ok();
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_action_outcomes_captured_at ON action_outcomes(captured_at)",
+        [],
+    )
+    .ok();
+    conn.execute(
         "CREATE TABLE IF NOT EXISTS notifications (\
          id INTEGER PRIMARY KEY AUTOINCREMENT, created_at TEXT NOT NULL, title TEXT NOT NULL, body TEXT NOT NULL, \
          state TEXT NOT NULL, intervention_id INTEGER, kind TEXT NOT NULL, action_payload TEXT)",
@@ -1114,11 +1346,47 @@ fn ensure_runtime_state(conn: &Connection) -> Result<(), String> {
     )
     .map_err(|err| err.to_string())?;
     ensure_column(conn, "recommendations", "ignored", "INTEGER DEFAULT 0")?;
+    ensure_column(conn, "ml_predictions", "candidate_utilities", "TEXT")?;
+    ensure_column(conn, "ml_predictions", "diagnostics_json", "TEXT")?;
     ensure_column(conn, "recommendations", "ignored_at", "TEXT")?;
     ensure_column(conn, "recommendations", "prediction_before_id", "INTEGER")?;
     ensure_column(conn, "recommendations", "prediction_after_id", "INTEGER")?;
     ensure_column(conn, "recommendations", "task_before", "TEXT")?;
     ensure_column(conn, "recommendations", "task_after", "TEXT")?;
+    ensure_column(conn, "recommendations", "created_at", "TEXT")?;
+    ensure_column(conn, "recommendations", "model_version", "TEXT")?;
+    ensure_column(conn, "recommendations", "policy_source", "TEXT")?;
+    ensure_column(
+        conn,
+        "recommendations",
+        "recommended_break_minutes",
+        "INTEGER",
+    )?;
+    ensure_column(conn, "recommendations", "decline_15", "REAL")?;
+    ensure_column(conn, "recommendations", "decline_30", "REAL")?;
+    ensure_column(conn, "recommendations", "decline_60", "REAL")?;
+    ensure_column(conn, "recommendations", "effectiveness_before", "REAL")?;
+    ensure_column(conn, "recommendations", "break_benefit", "REAL")?;
+    ensure_column(conn, "recommendations", "break_started_at", "TEXT")?;
+    ensure_column(conn, "recommendations", "break_finished_at", "TEXT")?;
+    ensure_column(conn, "recommendations", "actual_break_seconds", "INTEGER")?;
+    ensure_column(conn, "recommendations", "task_id", "TEXT")?;
+    ensure_column(conn, "recommendations", "task_category", "TEXT")?;
+    conn.execute(
+        "UPDATE recommendations SET created_at = COALESCE(created_at, timestamp)",
+        [],
+    )
+    .ok();
+    conn.execute(
+        "UPDATE recommendations SET recommended_break_minutes = COALESCE(recommended_break_minutes, recommended_duration)",
+        [],
+    )
+    .ok();
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_recommendations_created_at ON recommendations(created_at)",
+        [],
+    )
+    .ok();
     ensure_column(
         conn,
         "recommendation_outcomes",
@@ -1303,20 +1571,66 @@ fn latest_recommended_break_minutes() -> i64 {
 }
 
 fn latest_prediction_id(conn: &Connection) -> Option<i64> {
+    latest_prediction_snapshot(conn).map(|item| item.id)
+}
+
+fn latest_prediction_snapshot(conn: &Connection) -> Option<PredictionSnapshot> {
     if !table_exists(conn, "ml_predictions").unwrap_or(false) {
         return None;
     }
     conn.query_row(
-        "SELECT id FROM ml_predictions ORDER BY id DESC LIMIT 1",
+        "SELECT id, model_version, policy_source, effectiveness, decline_15m, decline_30m, \
+         decline_60m, break_benefit \
+         FROM ml_predictions ORDER BY id DESC LIMIT 1",
+        [],
+        prediction_snapshot_from_row,
+    )
+    .ok()
+}
+
+fn prediction_snapshot_by_id(conn: &Connection, id: Option<i64>) -> Option<PredictionSnapshot> {
+    let id = id?;
+    if !table_exists(conn, "ml_predictions").unwrap_or(false) {
+        return None;
+    }
+    conn.query_row(
+        "SELECT id, model_version, policy_source, effectiveness, decline_15m, decline_30m, \
+         decline_60m, break_benefit \
+         FROM ml_predictions WHERE id = ?1",
+        params![id],
+        prediction_snapshot_from_row,
+    )
+    .ok()
+}
+
+fn prediction_snapshot_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<PredictionSnapshot> {
+    Ok(PredictionSnapshot {
+        id: row.get(0)?,
+        model_version: row.get(1)?,
+        policy_source: row.get(2)?,
+        effectiveness: row.get::<_, Option<f64>>(3)?.unwrap_or(0.0),
+        decline_15: row.get::<_, Option<f64>>(4)?.unwrap_or(0.0),
+        decline_30: row.get::<_, Option<f64>>(5)?.unwrap_or(0.0),
+        decline_60: row.get::<_, Option<f64>>(6)?.unwrap_or(0.0),
+        break_benefit: row.get::<_, Option<f64>>(7)?.unwrap_or(0.0),
+    })
+}
+
+fn latest_break_recommendation_id(conn: &Connection) -> Option<i64> {
+    conn.query_row(
+        "SELECT id FROM recommendations WHERE recommended_action LIKE 'BREAK_%' ORDER BY id DESC LIMIT 1",
         [],
         |row| row.get(0),
     )
     .ok()
 }
 
-fn latest_break_recommendation_id(conn: &Connection) -> Option<i64> {
+fn latest_actionable_break_recommendation_id(conn: &Connection) -> Option<i64> {
     conn.query_row(
-        "SELECT id FROM recommendations WHERE recommended_action LIKE 'BREAK_%' ORDER BY id DESC LIMIT 1",
+        "SELECT id FROM recommendations \
+         WHERE recommended_action LIKE 'BREAK_%' AND completed_at IS NULL \
+         AND COALESCE(accepted, 0) = 0 AND COALESCE(ignored, 0) = 0 \
+         ORDER BY id DESC LIMIT 1",
         [],
         |row| row.get(0),
     )
@@ -1339,6 +1653,25 @@ fn current_task_label() -> Option<String> {
     } else {
         Some(task)
     }
+}
+
+fn task_category_for(task: Option<&str>) -> Option<String> {
+    let value = task?.trim().to_lowercase();
+    if value.is_empty() || value == "none" {
+        return None;
+    }
+    let category = match value.as_str() {
+        "homework" | "school" => "study",
+        "physics" | "chemistry" | "biology" => "science",
+        "language" => "english",
+        "planning" => "admin",
+        "work" | "study" | "coding" | "ml" | "math" | "english" | "reading" | "writing"
+        | "research" | "creative" | "communication" | "admin" | "gaming" | "rest" | "other" => {
+            value.as_str()
+        }
+        _ => "other",
+    };
+    Some(category.to_string())
 }
 
 fn persist_recommendation_outcome(
@@ -1446,22 +1779,363 @@ fn recommendation_break_quality(conn: &Connection, recommendation_id: i64) -> (f
     (active, idle, rest_task, score)
 }
 
-fn prediction_snapshot(conn: &Connection, id: Option<i64>) -> Option<(f64, f64)> {
-    let id = id?;
+#[derive(Debug)]
+struct PendingAction {
+    recommendation_id: i64,
+    action: String,
+    action_at: chrono::NaiveDateTime,
+}
+
+fn capture_pending_action_outcomes() -> Result<usize, String> {
+    let db_path = attentionos_db_path()?;
+    if !db_path.exists() {
+        return Ok(0);
+    }
+    let conn = Connection::open(db_path).map_err(|err| err.to_string())?;
+    ensure_runtime_state(&conn)?;
+    capture_pending_action_outcomes_in_conn(&conn, chrono::Utc::now().naive_utc())
+}
+
+fn capture_pending_action_outcomes_in_conn(
+    conn: &Connection,
+    now: chrono::NaiveDateTime,
+) -> Result<usize, String> {
+    let actions = pending_actions(conn)?;
+    let mut inserted = 0usize;
+    for action in actions {
+        for horizon in OUTCOME_HORIZONS_MINUTES {
+            let due_at = action.action_at + chrono::Duration::minutes(horizon);
+            if now < due_at || action_outcome_exists(conn, action.recommendation_id, horizon)? {
+                continue;
+            }
+            let prediction = latest_prediction_snapshot_at_or_before(conn, due_at)
+                .or_else(|| latest_prediction_snapshot(conn));
+            let metrics = activity_window_metrics(conn, action.action_at, due_at)?;
+            conn.execute(
+                "INSERT OR IGNORE INTO action_outcomes (recommendation_id, action, captured_at, \
+                 prediction_after_id, effectiveness_after, decline_15_after, decline_30_after, decline_60_after, \
+                 active_ratio_after, switch_rate_after, input_rate_after, idle_ratio_after, task_after, minutes_since_action) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+                params![
+                    action.recommendation_id,
+                    action.action,
+                    now.to_string(),
+                    prediction.as_ref().map(|item| item.id),
+                    prediction.as_ref().map(|item| item.effectiveness),
+                    prediction.as_ref().map(|item| item.decline_15),
+                    prediction.as_ref().map(|item| item.decline_30),
+                    prediction.as_ref().map(|item| item.decline_60),
+                    metrics.active_ratio,
+                    metrics.switch_rate,
+                    metrics.input_rate,
+                    metrics.idle_ratio,
+                    metrics.task_after,
+                    horizon,
+                ],
+            )
+            .map_err(|err| err.to_string())?;
+            if conn.changes() > 0 {
+                inserted += 1;
+            }
+        }
+    }
+    Ok(inserted)
+}
+
+fn pending_outcome_capture_count(conn: &Connection) -> Result<i64, String> {
+    if !table_exists(conn, "action_outcomes")? || !table_exists(conn, "recommendations")? {
+        return Ok(0);
+    }
+    let now = chrono::Utc::now().naive_utc();
+    let mut count = 0;
+    for action in pending_actions(conn)? {
+        for horizon in OUTCOME_HORIZONS_MINUTES {
+            let due_at = action.action_at + chrono::Duration::minutes(horizon);
+            if now >= due_at && !action_outcome_exists(conn, action.recommendation_id, horizon)? {
+                count += 1;
+            }
+        }
+    }
+    Ok(count)
+}
+
+fn pending_actions(conn: &Connection) -> Result<Vec<PendingAction>, String> {
+    if !table_exists(conn, "recommendations")? {
+        return Ok(Vec::new());
+    }
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, recommended_action, COALESCE(recommended_break_minutes, recommended_duration), \
+             COALESCE(accepted, 0), COALESCE(ignored, 0), \
+             COALESCE(break_started_at, started_at, ignored_at, timestamp) \
+             FROM recommendations \
+             WHERE COALESCE(accepted, 0) = 1 OR COALESCE(ignored, 0) = 1",
+        )
+        .map_err(|err| err.to_string())?;
+    let rows = stmt
+        .query_map([], |row| {
+            let id = row.get::<_, i64>(0)?;
+            let recommended_action = row
+                .get::<_, Option<String>>(1)?
+                .unwrap_or_else(|| "BREAK".to_string());
+            let minutes = row.get::<_, Option<i64>>(2)?.unwrap_or(0);
+            let accepted = row.get::<_, i64>(3)? == 1;
+            let ignored = row.get::<_, i64>(4)? == 1;
+            let raw_time = row.get::<_, String>(5)?;
+            let action = if ignored {
+                format!("IGNORE_{recommended_action}")
+            } else if accepted {
+                recommended_action
+            } else if minutes > 0 {
+                format!("BREAK_{minutes}")
+            } else {
+                "ACTION".to_string()
+            };
+            Ok((id, action, raw_time))
+        })
+        .map_err(|err| err.to_string())?;
+    let mut actions = Vec::new();
+    for row in rows {
+        let (recommendation_id, action, raw_time) = row.map_err(|err| err.to_string())?;
+        if let Ok(action_at) = parse_sqlite_time_utc(&raw_time) {
+            actions.push(PendingAction {
+                recommendation_id,
+                action,
+                action_at,
+            });
+        }
+    }
+    Ok(actions)
+}
+
+fn action_outcome_exists(
+    conn: &Connection,
+    recommendation_id: i64,
+    horizon: i64,
+) -> Result<bool, String> {
+    if !table_exists(conn, "action_outcomes")? {
+        return Ok(false);
+    }
+    let exists = conn
+        .query_row(
+            "SELECT 1 FROM action_outcomes WHERE recommendation_id = ?1 AND minutes_since_action = ?2 LIMIT 1",
+            params![recommendation_id, horizon],
+            |_| Ok(()),
+        )
+        .is_ok();
+    Ok(exists)
+}
+
+fn latest_prediction_snapshot_at_or_before(
+    conn: &Connection,
+    at: chrono::NaiveDateTime,
+) -> Option<PredictionSnapshot> {
     if !table_exists(conn, "ml_predictions").unwrap_or(false) {
         return None;
     }
     conn.query_row(
-        "SELECT effectiveness, decline_30m FROM ml_predictions WHERE id = ?1",
-        params![id],
-        |row| {
-            Ok((
-                row.get::<_, Option<f64>>(0)?.unwrap_or(0.0),
-                row.get::<_, Option<f64>>(1)?.unwrap_or(0.0),
-            ))
-        },
+        "SELECT id, model_version, policy_source, effectiveness, decline_15m, decline_30m, \
+         decline_60m, break_benefit \
+         FROM ml_predictions WHERE timestamp <= ?1 ORDER BY timestamp DESC LIMIT 1",
+        params![at.to_string()],
+        prediction_snapshot_from_row,
     )
     .ok()
+}
+
+fn activity_window_metrics(
+    conn: &Connection,
+    start: chrono::NaiveDateTime,
+    end: chrono::NaiveDateTime,
+) -> Result<OutcomeWindowMetrics, String> {
+    let settings = load_runtime_settings();
+    let idle_threshold_seconds = (settings.tracking.idle_threshold_minutes * 60) as f64;
+    let events = load_events_for_window(conn, start, end)?
+        .into_iter()
+        .filter(|event| {
+            !is_excluded_app(
+                &event.process_name,
+                &settings.tracking.excluded_applications,
+            )
+        })
+        .collect::<Vec<_>>();
+    let window_minutes = end.signed_duration_since(start).num_seconds().max(60) as f64 / 60.0;
+    if events.is_empty() {
+        return Ok(OutcomeWindowMetrics {
+            active_ratio: 0.0,
+            switch_rate: 0.0,
+            input_rate: 0.0,
+            idle_ratio: 1.0,
+            task_after: current_task_label(),
+        });
+    }
+    let mut total_seconds = 0i64;
+    let mut active_seconds = 0i64;
+    let mut input_events = 0i64;
+    for event in &events {
+        let seconds = event_overlap_seconds(event, start, end);
+        if seconds <= 0 {
+            continue;
+        }
+        total_seconds += seconds;
+        if is_active_event(event, idle_threshold_seconds) {
+            active_seconds += seconds;
+        }
+        input_events += event.keyboard_events + event.mouse_events;
+    }
+    let total_seconds = total_seconds.max(1);
+    let switches = count_switches(&events) as f64;
+    Ok(OutcomeWindowMetrics {
+        active_ratio: (active_seconds as f64 / total_seconds as f64).clamp(0.0, 1.0),
+        switch_rate: switches / window_minutes,
+        input_rate: input_events as f64 / window_minutes,
+        idle_ratio: ((total_seconds - active_seconds) as f64 / total_seconds as f64)
+            .clamp(0.0, 1.0),
+        task_after: events
+            .iter()
+            .rev()
+            .find_map(|event| event.task_label.clone())
+            .or_else(current_task_label),
+    })
+}
+
+fn load_events_for_window(
+    conn: &Connection,
+    start: chrono::NaiveDateTime,
+    end: chrono::NaiveDateTime,
+) -> Result<Vec<EventRow>, String> {
+    if !table_exists(conn, "activity_events")? {
+        return Ok(Vec::new());
+    }
+    let mut stmt = conn
+        .prepare(
+            "SELECT ts_start, ts_end, process_name, idle_seconds, keyboard_events, mouse_events, task_label \
+             FROM activity_events WHERE ts_start < ?2 AND ts_end > ?1 ORDER BY ts_start ASC",
+        )
+        .map_err(|err| err.to_string())?;
+    let rows = stmt
+        .query_map(params![start.to_string(), end.to_string()], |row| {
+            Ok(EventRow {
+                ts_start: row.get(0)?,
+                ts_end: row.get(1)?,
+                process_name: row.get(2)?,
+                idle_seconds: row.get(3)?,
+                keyboard_events: row.get(4)?,
+                mouse_events: row.get(5)?,
+                task_label: row.get(6)?,
+            })
+        })
+        .map_err(|err| err.to_string())?;
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|err| err.to_string())
+}
+
+fn event_overlap_seconds(
+    event: &EventRow,
+    start: chrono::NaiveDateTime,
+    end: chrono::NaiveDateTime,
+) -> i64 {
+    let Ok(event_start) = parse_sqlite_time_utc(&event.ts_start) else {
+        return 0;
+    };
+    let Ok(event_end) = parse_sqlite_time_utc(&event.ts_end) else {
+        return 0;
+    };
+    let overlap_start = event_start.max(start);
+    let overlap_end = event_end.min(end);
+    overlap_end
+        .signed_duration_since(overlap_start)
+        .num_seconds()
+        .clamp(0, MAX_EVENT_DURATION_SECONDS)
+}
+
+fn self_report_next_eligible_at(conn: &Connection) -> Option<String> {
+    let last_report = if table_exists(conn, "self_reports").unwrap_or(false) {
+        conn.query_row("SELECT MAX(timestamp) FROM self_reports", [], |row| {
+            row.get::<_, Option<String>>(0)
+        })
+        .unwrap_or(None)
+    } else {
+        None
+    };
+    let last_prompt = runtime_value(conn, "last_self_report_prompt_at");
+    let latest = [last_report, last_prompt]
+        .into_iter()
+        .flatten()
+        .filter_map(|value| parse_sqlite_time_utc(&value).ok())
+        .max();
+    latest
+        .map(|time| time + chrono::Duration::minutes(MIN_REPORT_INTERVAL_MINUTES))
+        .map(|time| time.to_string())
+}
+
+fn maybe_prompt_self_report(app: &AppHandle) -> Result<(), String> {
+    let db_path = attentionos_db_path()?;
+    if !db_path.exists() {
+        return Ok(());
+    }
+    let conn = Connection::open(db_path).map_err(|err| err.to_string())?;
+    ensure_runtime_state(&conn)?;
+    let now = chrono::Utc::now().naive_utc();
+    if let Some(next) =
+        self_report_next_eligible_at(&conn).and_then(|value| parse_sqlite_time_utc(&value).ok())
+    {
+        if now < next {
+            return Ok(());
+        }
+    }
+    let Some(trigger_at) = latest_self_report_trigger_time(&conn) else {
+        return Ok(());
+    };
+    if now < trigger_at + chrono::Duration::minutes(POST_BREAK_REPORT_DELAY_MINUTES) {
+        return Ok(());
+    }
+    let last_prompt = runtime_value(&conn, "last_self_report_prompt_at")
+        .and_then(|value| parse_sqlite_time_utc(&value).ok());
+    if last_prompt
+        .map(|value| value >= trigger_at)
+        .unwrap_or(false)
+    {
+        return Ok(());
+    }
+    let local_time = Local::now().format("%H:%M").to_string();
+    let body = format!("{local_time} - Как прошла последняя сессия?");
+    let notification_id = insert_app_notification(
+        &conn,
+        "AttentionOS",
+        &body,
+        "self_report_prompt",
+        "{\"source\":\"self-report-scheduler\"}",
+    )?;
+    set_runtime_value(&conn, "last_self_report_prompt_at", &now.to_string())?;
+    let settings = load_runtime_settings();
+    if settings.notifications.break_recommendations && !notifications_quiet_now(&settings) {
+        show_app_notification(app, "AttentionOS", &body);
+        set_runtime_value(
+            &conn,
+            "last_native_notification_id",
+            &notification_id.to_string(),
+        )?;
+    }
+    Ok(())
+}
+
+fn latest_self_report_trigger_time(conn: &Connection) -> Option<chrono::NaiveDateTime> {
+    if !table_exists(conn, "recommendations").unwrap_or(false) {
+        return None;
+    }
+    conn.query_row(
+        "SELECT MAX(COALESCE(break_finished_at, completed_at, ignored_at)) \
+         FROM recommendations WHERE completed_at IS NOT NULL OR ignored_at IS NOT NULL",
+        [],
+        |row| row.get::<_, Option<String>>(0),
+    )
+    .unwrap_or(None)
+    .and_then(|value| parse_sqlite_time_utc(&value).ok())
+}
+
+fn prediction_snapshot(conn: &Connection, id: Option<i64>) -> Option<(f64, f64)> {
+    prediction_snapshot_by_id(conn, id).map(|item| (item.effectiveness, item.decline_30))
 }
 
 fn parse_sqlite_time_utc(value: &str) -> Result<chrono::NaiveDateTime, chrono::ParseError> {
@@ -1508,6 +2182,10 @@ fn export_data() -> Result<String, String> {
         "self_reports": table_as_json(&conn, "self_reports")?,
         "interventions": table_as_json(&conn, "interventions")?,
         "notifications": table_as_json(&conn, "notifications")?,
+        "ml_predictions": table_as_json(&conn, "ml_predictions")?,
+        "recommendations": table_as_json(&conn, "recommendations")?,
+        "recommendation_outcomes": table_as_json(&conn, "recommendation_outcomes")?,
+        "action_outcomes": table_as_json(&conn, "action_outcomes")?,
     });
     std::fs::write(
         &output,
@@ -1529,7 +2207,14 @@ fn delete_self_reports() -> Result<(), String> {
 
 #[tauri::command]
 fn delete_interventions() -> Result<(), String> {
-    execute_delete(&["interventions", "notifications"])
+    execute_delete(&[
+        "interventions",
+        "notifications",
+        "ml_predictions",
+        "recommendations",
+        "recommendation_outcomes",
+        "action_outcomes",
+    ])
 }
 
 #[tauri::command]
@@ -1539,6 +2224,10 @@ fn delete_all_data() -> Result<(), String> {
         "self_reports",
         "interventions",
         "notifications",
+        "ml_predictions",
+        "recommendations",
+        "recommendation_outcomes",
+        "action_outcomes",
     ])
 }
 
@@ -1853,12 +2542,14 @@ fn build_dashboard(
     events: Vec<EventRow>,
     idle_threshold_seconds: f64,
 ) -> DashboardPayload {
-    let (state_history, daily_summary_from_db) = Connection::open(&db_path)
+    let (state_history, daily_summary_from_db, break_segments) = Connection::open(&db_path)
         .ok()
         .map(|conn| {
+            let _ = ensure_runtime_state(&conn);
             (
                 state_history(&conn, &date).unwrap_or_default(),
                 daily_summary_from_db(&conn, &date),
+                break_timeline_segments(&conn, &date).unwrap_or_default(),
             )
         })
         .unwrap_or_default();
@@ -1872,7 +2563,13 @@ fn build_dashboard(
     let focused_seconds = focused_activity_seconds(&timed_events, idle_threshold_seconds);
     let context_switches = count_switches(&events);
     let top_apps = top_apps(&timed_events, active_seconds, idle_threshold_seconds);
-    let timeline = timeline_segments(&timed_events, idle_threshold_seconds);
+    let mut timeline = timeline_segments(&timed_events, idle_threshold_seconds);
+    timeline.extend(break_segments);
+    timeline.sort_by(|a, b| {
+        a.start_minute
+            .cmp(&b.start_minute)
+            .then_with(|| a.end_minute.cmp(&b.end_minute))
+    });
     let recent_sessions = recent_sessions(&timed_events, idle_threshold_seconds);
 
     let focused_minutes = active_seconds_to_minutes(focused_seconds);
@@ -1883,13 +2580,35 @@ fn build_dashboard(
             .average_effectiveness
             .map(|value| ((active_minutes as f64) * (value / 100.0).clamp(0.0, 1.0)).round() as i64)
             .unwrap_or(active_minutes),
+        average_effectiveness: daily_summary_from_db.average_effectiveness,
         break_count: daily_summary_from_db.break_count,
         recommendation_count: daily_summary_from_db.recommendation_count,
         accepted_count: daily_summary_from_db.accepted_count,
         ignored_count: daily_summary_from_db.ignored_count,
+        average_break_minutes: daily_summary_from_db.average_break_minutes,
+        break_effectiveness_delta: daily_summary_from_db.break_effectiveness_delta,
         average_decline_risk: daily_summary_from_db.average_decline_risk,
         recovered_effective_minutes_estimate: daily_summary_from_db
             .recovered_effective_minutes_estimate,
+        recovered_effective_minutes_available: daily_summary_from_db
+            .recovered_effective_minutes_available,
+        personalization_samples_today: daily_summary_from_db.personalization_samples_today,
+        acceptance_rate: if daily_summary_from_db.recommendation_count > 0 {
+            Some(
+                daily_summary_from_db.accepted_count as f64
+                    / daily_summary_from_db.recommendation_count as f64,
+            )
+        } else {
+            None
+        },
+        completion_rate: if daily_summary_from_db.accepted_count > 0 {
+            Some(
+                daily_summary_from_db.break_count as f64
+                    / daily_summary_from_db.accepted_count as f64,
+            )
+        } else {
+            None
+        },
         best_period: best_work_block(&recent_sessions),
     };
     let state_label = if event_count == 0 {
@@ -2077,11 +2796,35 @@ fn is_productive_task(task: Option<&str>) -> bool {
         return false;
     };
     let normalized = task.trim().to_lowercase();
+    if normalized == "\u{0434}\u{0440}\u{0443}\u{0433}\u{043e}\u{0435}"
+        || normalized == "\u{043e}\u{0442}\u{0434}\u{044b}\u{0445}"
+        || normalized == "\u{0438}\u{0433}\u{0440}\u{0430}"
+    {
+        return false;
+    }
     !normalized.is_empty()
         && !matches!(
             normalized.as_str(),
             "none" | "other" | "rest" | "gaming" | "game" | "другое" | "отдых" | "игра"
         )
+}
+
+fn is_rest_task(task: Option<&str>) -> bool {
+    let Some(task) = task else {
+        return false;
+    };
+    let normalized = task.trim().to_lowercase();
+    if normalized == "rest"
+        || normalized == "break"
+        || normalized == "\u{043e}\u{0442}\u{0434}\u{044b}\u{0445}"
+        || normalized == "\u{043f}\u{0435}\u{0440}\u{0435}\u{0440}\u{044b}\u{0432}"
+    {
+        return true;
+    }
+    matches!(
+        task.trim().to_lowercase().as_str(),
+        "rest" | "отдых" | "break" | "перерыв"
+    )
 }
 
 fn count_switches(events: &[EventRow]) -> i64 {
@@ -2142,6 +2885,7 @@ fn timeline_segments(
                         app: "Idle".to_string(),
                         task: None,
                         kind: "idle".to_string(),
+                        state: "IDLE".to_string(),
                         start_minute: previous_end,
                         end_minute: start,
                         duration_minutes: (start - previous_end).max(1),
@@ -2155,6 +2899,7 @@ fn timeline_segments(
                     app: "Idle".to_string(),
                     task: None,
                     kind: "idle".to_string(),
+                    state: "IDLE".to_string(),
                     start_minute: 0,
                     end_minute: start,
                     duration_minutes: start.max(1),
@@ -2162,18 +2907,35 @@ fn timeline_segments(
             );
         }
         let is_idle = !is_active_event(item.event, idle_threshold_seconds);
+        let is_break = is_rest_task(item.event.task_label.as_deref());
         let app = if is_idle {
             "Idle".to_string()
+        } else if is_break {
+            "Break".to_string()
         } else {
             clean_app_name(&item.event.process_name)
         };
-        let kind = if is_idle { "idle" } else { "app" }.to_string();
+        let kind = if is_idle {
+            "idle"
+        } else if is_break {
+            "break"
+        } else {
+            "app"
+        }
+        .to_string();
         push_timeline_segment(
             &mut segments,
             TimelineSegment {
                 app,
                 task: item.event.task_label.clone(),
                 kind,
+                state: if is_idle {
+                    "IDLE".to_string()
+                } else if is_break {
+                    "BREAK".to_string()
+                } else {
+                    "WORK".to_string()
+                },
                 start_minute: start,
                 end_minute: end,
                 duration_minutes: (end - start).max(1),
@@ -2262,9 +3024,65 @@ fn work_block(
     }
 }
 
+fn break_timeline_segments(conn: &Connection, date: &str) -> Result<Vec<TimelineSegment>, String> {
+    if !table_exists(conn, "recommendations")? {
+        return Ok(Vec::new());
+    }
+    let mut stmt = conn
+        .prepare(
+            "SELECT COALESCE(break_started_at, started_at), COALESCE(break_finished_at, completed_at), \
+             COALESCE(recommended_break_minutes, recommended_duration, 10) \
+             FROM recommendations WHERE COALESCE(accepted, 0) = 1 AND COALESCE(break_started_at, started_at) IS NOT NULL",
+        )
+        .map_err(|err| err.to_string())?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, Option<String>>(0)?,
+                row.get::<_, Option<String>>(1)?,
+                row.get::<_, Option<i64>>(2)?.unwrap_or(10),
+            ))
+        })
+        .map_err(|err| err.to_string())?;
+    let mut segments = Vec::new();
+    for row in rows {
+        let (Some(start_raw), finished_raw, planned_minutes) =
+            row.map_err(|err| err.to_string())?
+        else {
+            continue;
+        };
+        let start_local = parse_sqlite_time(&start_raw);
+        let end_local = finished_raw
+            .as_deref()
+            .map(parse_sqlite_time)
+            .unwrap_or_else(|| start_local + chrono::Duration::minutes(planned_minutes.max(1)));
+        if start_local.date().to_string() != date && end_local.date().to_string() != date {
+            continue;
+        }
+        let mut start_minute = i64::from(start_local.time().num_seconds_from_midnight() / 60);
+        let mut end_minute = i64::from(end_local.time().num_seconds_from_midnight() / 60);
+        if start_local.date().to_string() < date.to_string() {
+            start_minute = 0;
+        }
+        if end_local.date().to_string() > date.to_string() || end_minute <= start_minute {
+            end_minute = 24 * 60;
+        }
+        segments.push(TimelineSegment {
+            app: "Break".to_string(),
+            task: Some("rest".to_string()),
+            kind: "break".to_string(),
+            state: "BREAK".to_string(),
+            start_minute: start_minute.clamp(0, 24 * 60),
+            end_minute: end_minute.clamp(start_minute + 1, 24 * 60),
+            duration_minutes: (end_minute - start_minute).max(1),
+        });
+    }
+    Ok(segments)
+}
+
 fn state_history(conn: &Connection, date: &str) -> Result<Vec<StatePoint>, String> {
     if !table_exists(conn, "ml_predictions")? {
-        return Ok(Vec::new());
+        return recommendation_state_markers(conn, date);
     }
     let mut stmt = conn
         .prepare(
@@ -2284,12 +3102,12 @@ fn state_history(conn: &Connection, date: &str) -> Result<Vec<StatePoint>, Strin
                 effectiveness: row.get::<_, Option<f64>>(1)?.unwrap_or(0.0),
                 decline_risk: row.get::<_, Option<f64>>(2)?.unwrap_or(0.0),
                 state: if action_value.starts_with("BREAK") {
-                    "break".to_string()
+                    "BREAK_RECOMMENDED".to_string()
                 } else {
-                    "work".to_string()
+                    "WORK".to_string()
                 },
                 marker: if action_value.starts_with("BREAK") {
-                    Some("recommendation".to_string())
+                    Some("break_recommended".to_string())
                 } else {
                     None
                 },
@@ -2297,8 +3115,114 @@ fn state_history(conn: &Connection, date: &str) -> Result<Vec<StatePoint>, Strin
             })
         })
         .map_err(|err| err.to_string())?;
-    rows.collect::<Result<Vec<_>, _>>()
-        .map_err(|err| err.to_string())
+    let mut points = rows
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|err| err.to_string())?;
+    points.extend(recommendation_state_markers(conn, date)?);
+    points.sort_by(|a, b| {
+        a.minute
+            .cmp(&b.minute)
+            .then_with(|| a.marker.cmp(&b.marker))
+    });
+    Ok(points)
+}
+
+fn recommendation_state_markers(conn: &Connection, date: &str) -> Result<Vec<StatePoint>, String> {
+    if !table_exists(conn, "recommendations")? {
+        return Ok(Vec::new());
+    }
+    let mut stmt = conn
+        .prepare(
+            "SELECT timestamp, started_at, completed_at, ignored_at, effectiveness_before, decline_30, break_benefit \
+             FROM recommendations ORDER BY timestamp ASC",
+        )
+        .map_err(|err| err.to_string())?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, Option<String>>(0)?,
+                row.get::<_, Option<String>>(1)?,
+                row.get::<_, Option<String>>(2)?,
+                row.get::<_, Option<String>>(3)?,
+                row.get::<_, Option<f64>>(4)?.unwrap_or(0.0),
+                row.get::<_, Option<f64>>(5)?.unwrap_or(0.0),
+                row.get::<_, Option<f64>>(6)?,
+            ))
+        })
+        .map_err(|err| err.to_string())?;
+    let mut points = Vec::new();
+    for row in rows {
+        let (created, started, completed, ignored, effectiveness, risk, benefit) =
+            row.map_err(|err| err.to_string())?;
+        push_state_marker(
+            &mut points,
+            created,
+            date,
+            effectiveness,
+            risk,
+            "BREAK_RECOMMENDED",
+            "break_recommended",
+            benefit,
+        );
+        push_state_marker(
+            &mut points,
+            started,
+            date,
+            effectiveness,
+            risk,
+            "BREAK",
+            "break_started",
+            benefit,
+        );
+        push_state_marker(
+            &mut points,
+            completed,
+            date,
+            effectiveness,
+            risk,
+            "READY_TO_WORK",
+            "break_finished",
+            benefit,
+        );
+        push_state_marker(
+            &mut points,
+            ignored,
+            date,
+            effectiveness,
+            risk,
+            "WORK",
+            "recommendation_ignored",
+            benefit,
+        );
+    }
+    Ok(points)
+}
+
+fn push_state_marker(
+    points: &mut Vec<StatePoint>,
+    timestamp: Option<String>,
+    date: &str,
+    effectiveness: f64,
+    risk: f64,
+    state: &str,
+    marker: &str,
+    benefit: Option<f64>,
+) {
+    let Some(timestamp) = timestamp else {
+        return;
+    };
+    let local = parse_sqlite_time(&timestamp);
+    if local.date().to_string() != date {
+        return;
+    }
+    points.push(StatePoint {
+        minute: i64::from(local.time().num_seconds_from_midnight() / 60),
+        effectiveness,
+        decline_risk: risk,
+        state: state.to_string(),
+        marker: Some(marker.to_string()),
+        break_benefit: benefit,
+    });
 }
 
 #[derive(Default)]
@@ -2308,8 +3232,12 @@ struct DailySummaryDb {
     recommendation_count: i64,
     accepted_count: i64,
     ignored_count: i64,
+    average_break_minutes: Option<f64>,
+    break_effectiveness_delta: Option<f64>,
     average_decline_risk: f64,
     recovered_effective_minutes_estimate: i64,
+    recovered_effective_minutes_available: bool,
+    personalization_samples_today: i64,
 }
 
 fn daily_summary_from_db(conn: &Connection, date: &str) -> DailySummaryDb {
@@ -2357,26 +3285,76 @@ fn daily_summary_from_db(conn: &Connection, date: &str) -> DailySummaryDb {
                 date.replace('\'', "''")
             ),
         );
-    }
-    if table_exists(conn, "recommendation_outcomes").unwrap_or(false) {
-        summary.recovered_effective_minutes_estimate = conn
+        summary.average_break_minutes = conn
             .query_row(
-                "SELECT COALESCE(SUM( \
+                "SELECT AVG(COALESCE(actual_break_seconds / 60.0, actual_duration, recommended_break_minutes, recommended_duration)) \
+                 FROM recommendations WHERE completed_at IS NOT NULL AND substr(datetime(timestamp, 'localtime'), 1, 10) = ?1",
+                params![date],
+                |row| row.get::<_, Option<f64>>(0),
+            )
+            .unwrap_or(None);
+    }
+    if table_exists(conn, "action_outcomes").unwrap_or(false) {
+        summary.personalization_samples_today = scalar_count(
+            conn,
+            &format!(
+                "SELECT COUNT(*) FROM action_outcomes WHERE substr(datetime(captured_at, 'localtime'), 1, 10) = '{}'",
+                date.replace('\'', "''")
+            ),
+        );
+        summary.break_effectiveness_delta = conn
+            .query_row(
+                "SELECT AVG(o.effectiveness_after - r.effectiveness_before) \
+                 FROM action_outcomes o \
+                 JOIN recommendations r ON r.id = o.recommendation_id \
+                 WHERE o.minutes_since_action = 30 AND r.accepted = 1 \
+                 AND o.effectiveness_after IS NOT NULL AND r.effectiveness_before IS NOT NULL \
+                 AND substr(datetime(o.captured_at, 'localtime'), 1, 10) = ?1",
+                params![date],
+                |row| row.get::<_, Option<f64>>(0),
+            )
+            .unwrap_or(None);
+        let recovered = conn
+            .query_row(
+                "SELECT SUM(MAX(o.effectiveness_after - r.effectiveness_before, 0) * 30.0 / 100.0) \
+                 FROM action_outcomes o \
+                 JOIN recommendations r ON r.id = o.recommendation_id \
+                 WHERE o.minutes_since_action = 30 AND r.accepted = 1 \
+                 AND o.effectiveness_after IS NOT NULL AND r.effectiveness_before IS NOT NULL \
+                 AND substr(datetime(o.captured_at, 'localtime'), 1, 10) = ?1",
+                params![date],
+                |row| row.get::<_, Option<f64>>(0),
+            )
+            .unwrap_or(None);
+        if let Some(value) = recovered {
+            summary.recovered_effective_minutes_estimate = value.round() as i64;
+            summary.recovered_effective_minutes_available = true;
+        }
+    }
+    if !summary.recovered_effective_minutes_available
+        && table_exists(conn, "recommendation_outcomes").unwrap_or(false)
+    {
+        let recovered = conn
+            .query_row(
+                "SELECT SUM( \
                     MAX( \
                         COALESCE(o.effectiveness_after, COALESCE(o.effectiveness_before, 0) + COALESCE(p.break_benefit, 0) * 3.0) \
                         - COALESCE(o.effectiveness_before, 0), \
                         0 \
                     ) * COALESCE(o.actual_duration, o.planned_duration, 10) / 100.0 \
                     * (0.55 + COALESCE(o.restful_break_score, 0.5) * 0.45) \
-                 ), 0) \
+                 ) \
                  FROM recommendation_outcomes o \
                  LEFT JOIN ml_predictions p ON p.id = o.prediction_before_id \
                  WHERE o.accepted = 1 AND substr(datetime(o.created_at, 'localtime'), 1, 10) = ?1",
                 params![date],
-                |row| row.get::<_, f64>(0),
+                |row| row.get::<_, Option<f64>>(0),
             )
-            .unwrap_or(0.0)
-            .round() as i64;
+            .unwrap_or(None);
+        if let Some(value) = recovered {
+            summary.recovered_effective_minutes_estimate = value.round() as i64;
+            summary.recovered_effective_minutes_available = true;
+        }
     }
     summary
 }
@@ -2473,6 +3451,123 @@ mod tests {
         assert_eq!(active_seconds, 90);
         assert_eq!(focus_seconds, 60);
     }
+
+    fn create_activity_events_table(conn: &Connection) {
+        conn.execute(
+            "CREATE TABLE activity_events (\
+             ts_start TEXT NOT NULL, ts_end TEXT NOT NULL, process_name TEXT NOT NULL, \
+             idle_seconds REAL NOT NULL, keyboard_events INTEGER NOT NULL, mouse_events INTEGER NOT NULL, \
+             task_label TEXT)",
+            [],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn runtime_state_creates_action_outcomes_table() {
+        let conn = Connection::open_in_memory().unwrap();
+        ensure_runtime_state(&conn).unwrap();
+        let columns = conn
+            .prepare("PRAGMA table_info(action_outcomes)")
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(1))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+
+        assert!(columns.contains(&"recommendation_id".to_string()));
+        assert!(columns.contains(&"minutes_since_action".to_string()));
+        assert!(columns.contains(&"active_ratio_after".to_string()));
+    }
+
+    #[test]
+    fn captures_action_outcomes_once_for_due_horizons() {
+        let conn = Connection::open_in_memory().unwrap();
+        ensure_runtime_state(&conn).unwrap();
+        create_activity_events_table(&conn);
+        let action_at = chrono::NaiveDate::from_ymd_opt(2026, 8, 23)
+            .unwrap()
+            .and_hms_opt(12, 0, 0)
+            .unwrap();
+        conn.execute(
+            "INSERT INTO ml_predictions (timestamp, model_version, effectiveness, decline_15m, decline_30m, decline_60m, break_benefit, recommended_action) \
+             VALUES (?1, 'demo-test', 50.0, 0.2, 0.3, 0.4, 6.0, 'BREAK_15')",
+            params![action_at.to_string()],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO ml_predictions (timestamp, model_version, effectiveness, decline_15m, decline_30m, decline_60m, break_benefit, recommended_action) \
+             VALUES (?1, 'demo-test', 64.0, 0.1, 0.2, 0.3, 3.0, 'CONTINUE')",
+            params![(action_at + chrono::Duration::minutes(30)).to_string()],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO recommendations (timestamp, created_at, recommended_action, recommended_duration, recommended_break_minutes, accepted, started_at, break_started_at, effectiveness_before) \
+             VALUES (?1, ?1, 'BREAK_15', 15, 15, 1, ?1, ?1, 50.0)",
+            params![action_at.to_string()],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO activity_events (ts_start, ts_end, process_name, idle_seconds, keyboard_events, mouse_events, task_label) \
+             VALUES (?1, ?2, 'Code.exe', 0.0, 12, 4, 'ml')",
+            params![
+                (action_at + chrono::Duration::minutes(16)).to_string(),
+                (action_at + chrono::Duration::minutes(16) + chrono::Duration::seconds(15)).to_string(),
+            ],
+        )
+        .unwrap();
+
+        let inserted = capture_pending_action_outcomes_in_conn(
+            &conn,
+            action_at + chrono::Duration::minutes(61),
+        )
+        .unwrap();
+        let inserted_again = capture_pending_action_outcomes_in_conn(
+            &conn,
+            action_at + chrono::Duration::minutes(62),
+        )
+        .unwrap();
+        let horizons = conn
+            .prepare(
+                "SELECT minutes_since_action FROM action_outcomes ORDER BY minutes_since_action",
+            )
+            .unwrap()
+            .query_map([], |row| row.get::<_, i64>(0))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+
+        assert_eq!(inserted, 3);
+        assert_eq!(inserted_again, 0);
+        assert_eq!(horizons, vec![15, 30, 60]);
+    }
+
+    #[test]
+    fn break_segments_and_state_markers_are_built_from_recommendations() {
+        let conn = Connection::open_in_memory().unwrap();
+        ensure_runtime_state(&conn).unwrap();
+        let started = "2026-08-23 09:10:00";
+        let finished = "2026-08-23 09:25:00";
+        conn.execute(
+            "INSERT INTO recommendations (timestamp, created_at, recommended_action, recommended_duration, recommended_break_minutes, accepted, started_at, completed_at, break_started_at, break_finished_at, effectiveness_before, decline_30, break_benefit) \
+             VALUES (?1, ?1, 'BREAK_15', 15, 15, 1, ?1, ?2, ?1, ?2, 45.0, 0.62, 8.0)",
+            params![started, finished],
+        )
+        .unwrap();
+
+        let segments = break_timeline_segments(&conn, "2026-08-23").unwrap();
+        let markers = recommendation_state_markers(&conn, "2026-08-23").unwrap();
+
+        assert_eq!(segments.len(), 1);
+        assert_eq!(segments[0].kind, "break");
+        assert_eq!(segments[0].task.as_deref(), Some("rest"));
+        assert!(markers
+            .iter()
+            .any(|point| point.marker.as_deref() == Some("break_started")));
+        assert!(markers
+            .iter()
+            .any(|point| point.marker.as_deref() == Some("break_finished")));
+    }
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -2497,6 +3592,8 @@ pub fn run() {
             )?;
             spawn_demo_ml_scheduler(handle.clone());
             spawn_break_monitor(handle.clone());
+            spawn_outcome_capture_scheduler();
+            spawn_self_report_scheduler(handle.clone());
             let show = MenuItem::with_id(app, "show", "Show AttentionOS", true, None::<&str>)?;
             let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
             let menu = Menu::with_items(app, &[&show, &quit])?;

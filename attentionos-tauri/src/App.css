@@ -416,6 +416,17 @@
   );
 }
 
+.timeline-segment.break {
+  top: 8px;
+  bottom: 8px;
+  border: 1px solid color-mix(in srgb, var(--warning) 55%, var(--border));
+  background: linear-gradient(
+    90deg,
+    color-mix(in srgb, var(--warning) 42%, transparent),
+    color-mix(in srgb, var(--accent) 30%, transparent)
+  );
+}
+
 .timeline-detail {
   display: flex;
   flex-wrap: wrap;
@@ -573,11 +584,33 @@
 }
 
 .state-history span.recommendation,
-.state-history button.recommendation {
+.state-history button.recommendation,
+.state-history span.break_recommended,
+.state-history button.break_recommended {
   width: 10px;
   height: 10px;
   background: var(--warning);
   box-shadow: 0 0 0 4px color-mix(in srgb, var(--warning) 18%, transparent);
+}
+
+.state-history span.break_started,
+.state-history button.break_started,
+.state-history span.break_finished,
+.state-history button.break_finished {
+  top: 0;
+  bottom: 0;
+  width: 6px;
+  height: auto;
+  border-radius: 0;
+  background: color-mix(in srgb, var(--accent) 34%, transparent);
+}
+
+.state-history span.recommendation_ignored,
+.state-history button.recommendation_ignored {
+  width: 10px;
+  height: 10px;
+  border: 2px solid var(--warning);
+  background: var(--surface);
 }
 
 .state-history button.selected {
