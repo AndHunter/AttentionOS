@@ -99,7 +99,7 @@ class ActivityEvent(SQLModel, table=True):
     )
 
     collector_version: str = Field(
-        default="0.1.0",
+        default="0.5.0",
         max_length=16,
         description="Version of the collector that produced this event.",
     )

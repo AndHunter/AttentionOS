@@ -43,6 +43,24 @@ def test_synthetic_generator_reproducible(tmp_path) -> None:
     )
 
 
+def test_synthetic_quality_report_is_explicit_output(tmp_path) -> None:
+    report_path = tmp_path / "reports" / "synthetic_quality_report.json"
+    metadata = generate_dataset(
+        tmp_path / "demo",
+        users=2,
+        days=1,
+        seed=123,
+        resolution_seconds=300,
+        step_minutes=15,
+        quality_report_path=report_path,
+    )
+
+    assert report_path.exists()
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    assert report["metadata"]["seed"] == metadata["seed"]
+    assert report["metadata"]["note"].startswith("Demo model trained on synthetic data")
+
+
 def test_rolling_features_and_no_future_leakage() -> None:
     start = pd.Timestamp("2026-01-01 09:00:00")
     rows = []

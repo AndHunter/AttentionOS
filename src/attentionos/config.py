@@ -130,7 +130,7 @@ class AppConfig(BaseSettings):
     intervention: InterventionConfig = Field(default_factory=InterventionConfig)
 
     # --- Derived ---
-    collector_version: str = "0.1.0"
+    collector_version: str = "0.5.0"
 
     @property
     def db_path(self) -> Path:

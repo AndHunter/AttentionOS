@@ -33,22 +33,32 @@ Thumbs.db
 # Environment and secrets
 .env
 .env.*
+!.env.example
 
 # Personal telemetry data - never commit
 data/personal/
+data/real/
+data/exports/
+exports/
+backups/
+logs/
 *.db
 *.db-wal
 *.db-shm
 *.sqlite
+*.sqlite-wal
+*.sqlite-shm
 *.sqlite3
 
 # Generated data and ML artifacts
 catboost_info/
+artifacts/demo_analysis/
 data/models/
 data/raw/
 data/processed/
 data/demo_test/
 models/demo_test/
+models/personal/
 models/*.pkl
 models/*.cbm
 models/*.joblib
@@ -59,7 +69,16 @@ data/export/
 # Logs
 *.log
 
+# Local build artifacts and temporary files
+*.exe
+*.msi
+*.dll
+*.zip
+*.tmp
+*.bak
+
 # Test and notebook caches
 .pytest_cache/
 .ruff_cache/
+.mypy_cache/
 .ipynb_checkpoints/

@@ -1,24 +1,24 @@
 # Verification Notes
 
-Date: 2026-08-10
-Platform: Windows 11, Python 3.13
+Date: 2026-08-24
+Platform: Windows 11, Python 3.13, Node 24, Rust 1.97
 
 ## Commands
 
 ```powershell
-python -m ruff check .
 python -m pytest
-python scripts\verify_tracking.py --seconds 2
-powershell -ExecutionPolicy Bypass -File scripts\build_windows_exe.ps1 -Clean
+cargo test --manifest-path .\attentionos-tauri\src-tauri\Cargo.toml
+npm --prefix .\attentionos-tauri run build
+npm --prefix .\attentionos-tauri run tauri build
 ```
 
 ## Results
 
-- Ruff: passed.
-- Pytest: 35 passed.
-- Tracking diagnostic: passed.
-- PyInstaller build: produced `dist\AttentionOS.exe`.
-- EXE smoke test: process started and stayed alive for more than 6 seconds.
+- Pytest: 76 passed.
+- Cargo tests: 9 passed.
+- React/Vite build: passed.
+- Tauri build: produced Windows EXE, NSIS setup and MSI artifacts.
+- Smoke launch: `app.exe` started and stayed alive for more than 5 seconds.
 
 ## Tracking Diagnostic Scope
 

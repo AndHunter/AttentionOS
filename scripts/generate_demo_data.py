@@ -108,7 +108,7 @@ def _generate_day_events(
                         keyboard_events=0,
                         mouse_events=0,
                         task_label="Rest",
-                        collector_version="0.1.0-demo",
+                        collector_version="0.5.0-demo",
                     )
                 )
                 current_time += timedelta(seconds=polling_sec)
@@ -169,7 +169,7 @@ def _generate_day_events(
                 keyboard_events=kb_events,
                 mouse_events=mouse_events,
                 task_label=current_task,
-                collector_version="0.1.0-demo",
+                collector_version="0.5.0-demo",
             )
         )
 

@@ -357,7 +357,7 @@ class PersonalStateModel:
         # Build model card
         self.model_card = ModelCard(
             name=f"AttentionOS-{self.model_type}",
-            version="0.1.0",
+            version="0.5.0",
             target=f"low_performance (effectiveness <= {self.low_perf_threshold})",
             task="Binary classification",
             features_used=list(X_train.columns),

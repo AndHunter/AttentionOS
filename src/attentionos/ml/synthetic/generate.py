@@ -22,6 +22,7 @@ def generate_dataset(
     seed: int,
     resolution_seconds: int,
     step_minutes: int,
+    quality_report_path: Path | None = None,
 ) -> dict[str, object]:
     rng = np.random.default_rng(seed)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -65,7 +66,8 @@ def generate_dataset(
         "note": "Demo model trained on synthetic data. Synthetic metrics are not real-world validation.",
     }
     (output_dir / "metadata.json").write_text(json.dumps(metadata, indent=2), encoding="utf-8")
-    _write_quality_report(output_dir, telemetry_df, reports_df, training, metadata)
+    if quality_report_path is not None:
+        _write_quality_report(quality_report_path, telemetry_df, reports_df, training, metadata)
     return metadata
 
 
@@ -117,7 +119,7 @@ def _attach_targets(features: pd.DataFrame, telemetry: pd.DataFrame, reports: pd
 
 
 def _write_quality_report(
-    output_dir: Path,
+    report_path: Path,
     telemetry: pd.DataFrame,
     reports: pd.DataFrame,
     training: pd.DataFrame,
@@ -137,11 +139,8 @@ def _write_quality_report(
         if not telemetry.empty
         else {},
     }
-    analysis_dir = Path("artifacts/demo_analysis")
-    analysis_dir.mkdir(parents=True, exist_ok=True)
-    (analysis_dir / "synthetic_quality_report.json").write_text(
-        json.dumps(report, indent=2, default=str), encoding="utf-8"
-    )
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    report_path.write_text(json.dumps(report, indent=2, default=str), encoding="utf-8")
 
 
 def main() -> None:
@@ -152,6 +151,12 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--resolution-seconds", type=int, default=60)
     parser.add_argument("--step-minutes", type=int, default=5)
+    parser.add_argument(
+        "--quality-report",
+        type=Path,
+        default=Path("artifacts/demo_analysis/synthetic_quality_report.json"),
+        help="Optional synthetic analysis report path for manual demo-generation runs.",
+    )
     args = parser.parse_args()
     metadata = generate_dataset(
         args.output_dir,
@@ -160,10 +165,10 @@ def main() -> None:
         args.seed,
         args.resolution_seconds,
         args.step_minutes,
+        args.quality_report,
     )
     print(json.dumps(metadata, indent=2))
 
 
 if __name__ == "__main__":
     main()
-
