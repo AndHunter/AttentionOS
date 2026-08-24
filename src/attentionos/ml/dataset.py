@@ -69,6 +69,8 @@ def chronological_split(
 def build_action_outcome_dataset(
     recommendations: Sequence[Mapping[str, Any]],
     outcomes: Sequence[Mapping[str, Any]],
+    *,
+    include_invalid: bool = False,
 ) -> pd.DataFrame:
     """Build real action-outcome rows: X_t + action_t -> Y_future.
 
@@ -82,6 +84,9 @@ def build_action_outcome_dataset(
     }
     rows: list[dict[str, object]] = []
     for outcome in outcomes:
+        outcome_quality = str(outcome.get("outcome_quality") or "VALID")
+        if not include_invalid and outcome_quality != "VALID":
+            continue
         recommendation_id = outcome.get("recommendation_id")
         if recommendation_id is None:
             continue
@@ -124,6 +129,8 @@ def build_action_outcome_dataset(
                 "input_rate_after": _optional_float(outcome.get("input_rate_after")),
                 "idle_ratio_after": _optional_float(outcome.get("idle_ratio_after")),
                 "task_after": outcome.get("task_after"),
+                "outcome_quality": outcome_quality,
+                "quality_reason": outcome.get("quality_reason"),
                 "future_effectiveness_delta": (
                     effectiveness_after - effectiveness_before
                     if effectiveness_before is not None and effectiveness_after is not None

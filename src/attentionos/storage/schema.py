@@ -149,6 +149,11 @@ class SelfReport(SQLModel, table=True):
         max_length=500,
         description="Optional free-text note.",
     )
+    prompt_reason: str = Field(
+        default="MANUAL",
+        max_length=32,
+        description="Why the report was requested: MANUAL, POST_BREAK, IGNORED_RECOMMENDATION, etc.",
+    )
 
 
 class Intervention(SQLModel, table=True):

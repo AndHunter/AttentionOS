@@ -71,20 +71,14 @@ def run_demo_inference(
         current_effectiveness_raw = float(np.clip(eff.predict(x)[0], 1, 5))
         personal = _predict_personal_effectiveness(row)
         if personal is not None:
-            personal_raw, personal_weight, personal_version = personal
-            current_effectiveness_raw = float(
-                np.clip(
-                    current_effectiveness_raw * (1 - personal_weight)
-                    + personal_raw * personal_weight,
-                    1,
-                    5,
-                )
-            )
+            _personal_raw, personal_weight, personal_version = personal
             diagnostics["personal_model_loaded"] = True
             diagnostics["personal_model_version"] = personal_version
             diagnostics["personal_model_weight"] = round(personal_weight, 3)
+            diagnostics["personal_model_mode"] = "SHADOW_ONLY"
         else:
             diagnostics["personal_model_loaded"] = False
+            diagnostics["personal_model_mode"] = "NONE"
         effectiveness = _effectiveness_to_100(current_effectiveness_raw)
         decline_base = float(np.clip(decline.predict_proba(x)[0][1], 0, 1))
         trend_pressure = _trend_pressure(row)
@@ -504,7 +498,8 @@ def _ensure_ml_tables(conn: sqlite3.Connection) -> None:
         "captured_at TEXT NOT NULL, prediction_after_id INTEGER, effectiveness_after REAL, "
         "decline_15_after REAL, decline_30_after REAL, decline_60_after REAL, "
         "active_ratio_after REAL, switch_rate_after REAL, input_rate_after REAL, idle_ratio_after REAL, "
-        "task_after TEXT, minutes_since_action INTEGER NOT NULL)"
+        "task_after TEXT, minutes_since_action INTEGER NOT NULL, "
+        "outcome_quality TEXT DEFAULT 'VALID', quality_reason TEXT)"
     )
     conn.execute(
         "CREATE UNIQUE INDEX IF NOT EXISTS ux_action_outcomes_recommendation_horizon "
@@ -515,6 +510,15 @@ def _ensure_ml_tables(conn: sqlite3.Connection) -> None:
         "id INTEGER PRIMARY KEY AUTOINCREMENT, created_at TEXT NOT NULL, "
         "title TEXT NOT NULL, body TEXT NOT NULL, "
         "state TEXT NOT NULL, intervention_id INTEGER, kind TEXT NOT NULL, action_payload TEXT)"
+    )
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS personal_shadow_predictions ("
+        "id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp TEXT NOT NULL, "
+        "recommendation_id INTEGER NOT NULL, action_outcome_id INTEGER NOT NULL UNIQUE, "
+        "demo_effectiveness REAL, demo_decline_15 REAL, demo_decline_30 REAL, demo_decline_60 REAL, "
+        "demo_action TEXT, personal_effectiveness REAL, personal_decline_15 REAL, "
+        "personal_decline_30 REAL, personal_decline_60 REAL, personal_action TEXT, "
+        "action_agreement INTEGER, actual_effectiveness_after REAL)"
     )
     _ensure_column(conn, "ml_predictions", "candidate_utilities", "TEXT")
     _ensure_column(conn, "ml_predictions", "diagnostics_json", "TEXT")
@@ -538,6 +542,8 @@ def _ensure_ml_tables(conn: sqlite3.Connection) -> None:
     _ensure_column(conn, "recommendations", "actual_break_seconds", "INTEGER")
     _ensure_column(conn, "recommendations", "task_id", "TEXT")
     _ensure_column(conn, "recommendations", "task_category", "TEXT")
+    _ensure_column(conn, "action_outcomes", "outcome_quality", "TEXT DEFAULT 'VALID'")
+    _ensure_column(conn, "action_outcomes", "quality_reason", "TEXT")
     conn.execute("UPDATE recommendations SET created_at = COALESCE(created_at, timestamp)")
     conn.execute(
         "UPDATE recommendations SET recommended_break_minutes = COALESCE(recommended_break_minutes, recommended_duration)"

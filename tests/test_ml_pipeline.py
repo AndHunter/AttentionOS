@@ -8,7 +8,7 @@ from attentionos.ml.dataset import (
     build_effectiveness_dataset,
     chronological_split,
 )
-from attentionos.ml.features import compute_feature_window
+from attentionos.ml.features import FEATURE_SCHEMA_VERSION, compute_feature_window
 from attentionos.ml.train import train_effectiveness_baselines
 from attentionos.storage.schema import ActivityEvent, SelfReport
 
@@ -20,6 +20,10 @@ def test_feature_window_generation(sample_events) -> None:
     assert features["active_time"] > 0
     assert features["context_switch_count"] >= 1
     assert features["app_entropy"] >= 0
+
+
+def test_feature_schema_version_is_frozen_for_real_collection() -> None:
+    assert FEATURE_SCHEMA_VERSION == "v1"
 
 
 def test_personal_baseline_relative_features() -> None:
@@ -125,6 +129,37 @@ def test_action_outcome_dataset_joins_recommendations_to_future_rows() -> None:
     assert row["action"] == "BREAK_15"
     assert row["task_category"] == "ml"
     assert row["future_effectiveness_delta"] == 15
+
+
+def test_action_outcome_dataset_excludes_invalid_rows_by_default() -> None:
+    recommendations = [
+        {
+            "id": 7,
+            "created_at": "2026-08-23 12:00:00",
+            "recommended_action": "BREAK_15",
+            "accepted": 1,
+            "ignored": 0,
+            "effectiveness_before": 50,
+            "task_category": "ml",
+        }
+    ]
+    outcomes = [
+        {
+            "recommendation_id": 7,
+            "action": "BREAK_15",
+            "captured_at": "2026-08-23 12:30:00",
+            "minutes_since_action": 30,
+            "effectiveness_after": 65,
+            "outcome_quality": "LONG_IDLE",
+        }
+    ]
+
+    filtered = build_action_outcome_dataset(recommendations, outcomes)
+    included = build_action_outcome_dataset(recommendations, outcomes, include_invalid=True)
+
+    assert filtered.empty
+    assert len(included) == 1
+    assert included.iloc[0]["outcome_quality"] == "LONG_IDLE"
 
 
 def test_ml_training_on_synthetic_dataset() -> None:

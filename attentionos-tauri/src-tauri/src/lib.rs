@@ -4,8 +4,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::env;
 use std::fs::{File, OpenOptions};
-use std::io::Read;
-use std::path::PathBuf;
+use std::io::{Read, Write};
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::Mutex;
 use std::thread;
@@ -33,7 +33,17 @@ const POST_BREAK_REPORT_DELAY_MINUTES: i64 = 15;
 const PERSONALIZATION_EXPERIMENTAL_OUTCOMES: i64 = 30;
 const PERSONALIZATION_EARLY_OUTCOMES: i64 = 50;
 const PERSONALIZATION_TARGET_OUTCOMES: i64 = 100;
-const SQLITE_SCHEMA_VERSION: i64 = 4;
+const SQLITE_SCHEMA_VERSION: i64 = 5;
+const APP_VERSION: &str = "0.5.0";
+const FEATURE_SCHEMA_VERSION: &str = "v1";
+const DEMO_MODEL_VERSION: &str = "demo-v1";
+const PERSONAL_SHADOW_MODEL_VERSION: &str = "shadow-v1";
+const STALE_TELEMETRY_THRESHOLD_SECONDS: i64 = 5 * 60;
+const OUTCOME_SCHEDULER_WARNING_SECONDS: i64 = 90 * 60;
+const OUTCOME_MIN_EVENT_SECONDS: i64 = 60;
+const OUTCOME_LONG_IDLE_RATIO: f64 = 0.80;
+const BACKUP_RETENTION: usize = 10;
+const STRUCTURED_LOG_MAX_BYTES: u64 = 1_048_576;
 
 struct CollectorProcess {
     child: Mutex<Option<Child>>,
@@ -151,6 +161,11 @@ struct BreakStatePayload {
 
 #[derive(Debug, Serialize)]
 struct MlDiagnosticsPayload {
+    app_version: String,
+    db_schema_version: i64,
+    feature_schema_version: String,
+    demo_model_version: String,
+    personal_model_version: Option<String>,
     last_inference_at: Option<String>,
     model_version: Option<String>,
     policy_source: Option<String>,
@@ -171,6 +186,44 @@ struct MlDiagnosticsPayload {
     completed_breaks: i64,
     ignored_recommendations: i64,
     usable_outcomes: i64,
+    data_quality: DataQualityPayload,
+    shadow_model: ShadowModelPayload,
+}
+
+#[derive(Debug, Serialize, Clone)]
+struct DataQualityPayload {
+    telemetry: String,
+    recommendations: String,
+    outcomes: String,
+    self_reports: String,
+    usable_outcomes: i64,
+    incomplete_outcomes: i64,
+    duplicate_outcomes: i64,
+    invalid_outcomes: i64,
+    last_telemetry_at: Option<String>,
+    last_inference_at: Option<String>,
+    last_outcome_capture_at: Option<String>,
+    last_self_report_at: Option<String>,
+    last_telemetry_age_seconds: Option<i64>,
+    last_inference_age_seconds: Option<i64>,
+    last_outcome_capture_age_seconds: Option<i64>,
+    warnings: Vec<String>,
+}
+
+#[derive(Debug, Serialize, Clone)]
+struct ShadowModelPayload {
+    status: String,
+    training_outcomes: i64,
+    min_shadow_outcomes: i64,
+    demo_mae: Option<f64>,
+    personal_mae: Option<f64>,
+    action_agreement: Option<f64>,
+    personal_better_predictions: i64,
+    demo_better_predictions: i64,
+    insufficient_unknown: i64,
+    personal_model_version: Option<String>,
+    eligible_for_activation: bool,
+    validation_method: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -275,6 +328,8 @@ struct PredictionSnapshot {
 
 #[derive(Debug)]
 struct OutcomeWindowMetrics {
+    event_count: usize,
+    total_seconds: i64,
     active_ratio: f64,
     switch_rate: f64,
     input_rate: f64,
@@ -373,37 +428,76 @@ fn mark_notification_read(id: i64) -> Result<(), String> {
 fn save_self_report(report: SelfReportPayload) -> Result<(), String> {
     let db_path = attentionos_db_path()?;
     let conn = Connection::open(db_path).map_err(|err| err.to_string())?;
+    ensure_runtime_state(&conn)?;
     let now_utc = chrono::Utc::now().naive_utc();
     let window_start = now_utc - chrono::Duration::minutes(30);
     let note = report.note.trim();
-    conn.execute(
-        "INSERT INTO self_reports (
-            timestamp,
-            task_name,
-            telemetry_window_start,
-            telemetry_window_end,
-            perceived_effectiveness,
-            perceived_fatigue,
-            task_difficulty,
-            note
-        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-        params![
-            now_utc.to_string(),
-            report.task,
-            window_start.to_string(),
-            now_utc.to_string(),
-            report.effectiveness.clamp(1, 5),
-            report.fatigue.clamp(1, 5),
-            report.difficulty.clamp(1, 5),
-            if note.is_empty() {
-                None
-            } else {
-                Some(note.to_string())
-            },
-        ],
-    )
-    .map_err(|err| err.to_string())?;
+    let report_task = report.task.clone();
+    let prompt_reason = runtime_value(&conn, "pending_self_report_prompt_reason")
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| "MANUAL".to_string());
+    let optional_note = if note.is_empty() {
+        None
+    } else {
+        Some(note.to_string())
+    };
+    if column_exists(&conn, "self_reports", "prompt_reason").unwrap_or(false) {
+        conn.execute(
+            "INSERT INTO self_reports (
+                timestamp,
+                task_name,
+                telemetry_window_start,
+                telemetry_window_end,
+                perceived_effectiveness,
+                perceived_fatigue,
+                task_difficulty,
+                note,
+                prompt_reason
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params![
+                now_utc.to_string(),
+                report_task.as_deref(),
+                window_start.to_string(),
+                now_utc.to_string(),
+                report.effectiveness.clamp(1, 5),
+                report.fatigue.clamp(1, 5),
+                report.difficulty.clamp(1, 5),
+                optional_note,
+                prompt_reason,
+            ],
+        )
+        .map_err(|err| err.to_string())?;
+    } else {
+        conn.execute(
+            "INSERT INTO self_reports (
+                timestamp,
+                task_name,
+                telemetry_window_start,
+                telemetry_window_end,
+                perceived_effectiveness,
+                perceived_fatigue,
+                task_difficulty,
+                note
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                now_utc.to_string(),
+                report_task.as_deref(),
+                window_start.to_string(),
+                now_utc.to_string(),
+                report.effectiveness.clamp(1, 5),
+                report.fatigue.clamp(1, 5),
+                report.difficulty.clamp(1, 5),
+                optional_note,
+            ],
+        )
+        .map_err(|err| err.to_string())?;
+    }
+    set_runtime_value(&conn, "pending_self_report_prompt_reason", "")?;
     mark_break_notifications_read(&conn)?;
+    structured_log(
+        "self_report_saved",
+        serde_json::json!({"prompt_reason": prompt_reason, "task": report_task}),
+    );
     Ok(())
 }
 
@@ -447,7 +541,13 @@ fn get_ml_diagnostics() -> Result<MlDiagnosticsPayload, String> {
         let diagnostics_raw: Option<String> = row.get(4)?;
         let progress = ml_progress(&conn);
         let latest_recommendation = latest_recommendation_status(&conn);
+        let shadow = shadow_model_status(&conn);
         Ok(MlDiagnosticsPayload {
+            app_version: APP_VERSION.to_string(),
+            db_schema_version: SQLITE_SCHEMA_VERSION,
+            feature_schema_version: FEATURE_SCHEMA_VERSION.to_string(),
+            demo_model_version: DEMO_MODEL_VERSION.to_string(),
+            personal_model_version: shadow.personal_model_version.clone(),
             last_inference_at: row.get(0)?,
             model_version: row.get(1)?,
             policy_source: row.get(2)?,
@@ -463,13 +563,15 @@ fn get_ml_diagnostics() -> Result<MlDiagnosticsPayload, String> {
             pending_outcome_captures: pending_outcome_capture_count(&conn).unwrap_or_default(),
             self_report_next_eligible_at: self_report_next_eligible_at(&conn),
             personalization_progress: personalization_progress(progress.usable_outcomes),
-            personal_model_status: personal_model_status(progress.usable_outcomes),
+            personal_model_status: shadow.status.clone(),
             real_telemetry_hours: progress.real_telemetry_hours,
             self_reports: progress.self_reports,
             recommendations: progress.recommendations,
             completed_breaks: progress.completed_breaks,
             ignored_recommendations: progress.ignored_recommendations,
             usable_outcomes: progress.usable_outcomes,
+            data_quality: data_quality_status(&conn),
+            shadow_model: shadow,
         })
     })
     .or_else(|_| Ok(ml_diagnostics_empty(&conn)))
@@ -487,7 +589,13 @@ struct MlProgress {
 fn ml_diagnostics_empty(conn: &Connection) -> MlDiagnosticsPayload {
     let progress = ml_progress(conn);
     let latest_recommendation = latest_recommendation_status(conn);
+    let shadow = shadow_model_status(conn);
     MlDiagnosticsPayload {
+        app_version: APP_VERSION.to_string(),
+        db_schema_version: SQLITE_SCHEMA_VERSION,
+        feature_schema_version: FEATURE_SCHEMA_VERSION.to_string(),
+        demo_model_version: DEMO_MODEL_VERSION.to_string(),
+        personal_model_version: shadow.personal_model_version.clone(),
         last_inference_at: None,
         model_version: None,
         policy_source: None,
@@ -503,18 +611,20 @@ fn ml_diagnostics_empty(conn: &Connection) -> MlDiagnosticsPayload {
         pending_outcome_captures: pending_outcome_capture_count(conn).unwrap_or_default(),
         self_report_next_eligible_at: self_report_next_eligible_at(conn),
         personalization_progress: personalization_progress(progress.usable_outcomes),
-        personal_model_status: personal_model_status(progress.usable_outcomes),
+        personal_model_status: shadow.status.clone(),
         real_telemetry_hours: progress.real_telemetry_hours,
         self_reports: progress.self_reports,
         recommendations: progress.recommendations,
         completed_breaks: progress.completed_breaks,
         ignored_recommendations: progress.ignored_recommendations,
         usable_outcomes: progress.usable_outcomes,
+        data_quality: data_quality_status(conn),
+        shadow_model: shadow,
     }
 }
 
 fn ml_progress(conn: &Connection) -> MlProgress {
-    let action_outcomes = table_count(conn, "action_outcomes");
+    let action_outcomes = usable_action_outcome_count(conn);
     MlProgress {
         real_telemetry_hours: telemetry_hours(conn),
         self_reports: table_count(conn, "self_reports"),
@@ -541,14 +651,582 @@ fn personalization_progress(usable_outcomes: i64) -> i64 {
 
 fn personal_model_status(usable_outcomes: i64) -> String {
     if usable_outcomes >= PERSONALIZATION_TARGET_OUTCOMES {
-        "eligible".to_string()
+        "ELIGIBLE".to_string()
     } else if usable_outcomes >= PERSONALIZATION_EARLY_OUTCOMES {
-        "early_personalization".to_string()
+        "EXPERIMENTAL".to_string()
     } else if usable_outcomes >= PERSONALIZATION_EXPERIMENTAL_OUTCOMES {
-        "experimental".to_string()
+        "SHADOW".to_string()
     } else {
-        "collecting".to_string()
+        "COLLECTING".to_string()
     }
+}
+
+fn usable_action_outcome_count(conn: &Connection) -> i64 {
+    if !table_exists(conn, "action_outcomes").unwrap_or(false) {
+        return 0;
+    }
+    if column_exists(conn, "action_outcomes", "outcome_quality").unwrap_or(false) {
+        scalar_count(
+            conn,
+            "SELECT COUNT(*) FROM action_outcomes WHERE COALESCE(outcome_quality, 'VALID') = 'VALID'",
+        )
+    } else {
+        table_count(conn, "action_outcomes")
+    }
+}
+
+fn data_quality_status(conn: &Connection) -> DataQualityPayload {
+    let now = chrono::Utc::now().naive_utc();
+    let last_telemetry_at = latest_timestamp(conn, "activity_events", "ts_end");
+    let last_inference_at = latest_timestamp(conn, "ml_predictions", "timestamp");
+    let last_outcome_capture_at = latest_timestamp(conn, "action_outcomes", "captured_at");
+    let last_self_report_at = latest_timestamp(conn, "self_reports", "timestamp");
+    let last_telemetry_age_seconds = last_telemetry_at
+        .as_deref()
+        .and_then(|value| parse_sqlite_time_utc(value).ok())
+        .map(|value| now.signed_duration_since(value).num_seconds().max(0));
+    let last_inference_age_seconds = last_inference_at
+        .as_deref()
+        .and_then(|value| parse_sqlite_time_utc(value).ok())
+        .map(|value| now.signed_duration_since(value).num_seconds().max(0));
+    let last_outcome_capture_age_seconds = last_outcome_capture_at
+        .as_deref()
+        .and_then(|value| parse_sqlite_time_utc(value).ok())
+        .map(|value| now.signed_duration_since(value).num_seconds().max(0));
+    let usable_outcomes = usable_action_outcome_count(conn);
+    let incomplete_outcomes = pending_outcome_capture_count(conn).unwrap_or_default();
+    let duplicate_outcomes = duplicate_action_outcome_count(conn);
+    let invalid_outcomes = invalid_action_outcome_count(conn);
+    let telemetry_rows = table_count(conn, "activity_events");
+    let recommendations = table_count(conn, "recommendations");
+    let self_reports = table_count(conn, "self_reports");
+    let mut warnings = data_integrity_warnings(conn);
+
+    let telemetry = if telemetry_rows == 0 {
+        "EMPTY"
+    } else if last_telemetry_age_seconds
+        .map(|age| age > STALE_TELEMETRY_THRESHOLD_SECONDS)
+        .unwrap_or(false)
+    {
+        warnings.push(format!(
+            "Telemetry is stale: last row is older than {} seconds",
+            STALE_TELEMETRY_THRESHOLD_SECONDS
+        ));
+        "STALE"
+    } else {
+        "OK"
+    }
+    .to_string();
+    let recommendations_status = if recommendations == 0 { "EMPTY" } else { "OK" }.to_string();
+    let outcomes = if duplicate_outcomes > 0 || invalid_outcomes > 0 {
+        "WARN"
+    } else if usable_outcomes == 0 {
+        "EMPTY"
+    } else {
+        "OK"
+    }
+    .to_string();
+    let self_report_status = if self_reports == 0 { "EMPTY" } else { "OK" }.to_string();
+
+    if incomplete_outcomes > 0 {
+        match last_outcome_capture_age_seconds {
+            Some(age) if age > OUTCOME_SCHEDULER_WARNING_SECONDS => warnings.push(format!(
+                "Outcome scheduler has pending captures and no fresh capture for {} minutes",
+                OUTCOME_SCHEDULER_WARNING_SECONDS / 60
+            )),
+            None => warnings.push(
+                "Outcome scheduler has pending captures and no captured outcome yet".to_string(),
+            ),
+            _ => {}
+        }
+    }
+
+    DataQualityPayload {
+        telemetry,
+        recommendations: recommendations_status,
+        outcomes,
+        self_reports: self_report_status,
+        usable_outcomes,
+        incomplete_outcomes,
+        duplicate_outcomes,
+        invalid_outcomes,
+        last_telemetry_at,
+        last_inference_at,
+        last_outcome_capture_at,
+        last_self_report_at,
+        last_telemetry_age_seconds,
+        last_inference_age_seconds,
+        last_outcome_capture_age_seconds,
+        warnings,
+    }
+}
+
+fn latest_timestamp(conn: &Connection, table: &str, column: &str) -> Option<String> {
+    if !table_exists(conn, table).unwrap_or(false) {
+        return None;
+    }
+    conn.query_row(&format!("SELECT MAX({column}) FROM {table}"), [], |row| {
+        row.get::<_, Option<String>>(0)
+    })
+    .unwrap_or(None)
+}
+
+fn duplicate_action_outcome_count(conn: &Connection) -> i64 {
+    if !table_exists(conn, "action_outcomes").unwrap_or(false) {
+        return 0;
+    }
+    scalar_count(
+        conn,
+        "SELECT COALESCE(SUM(extra), 0) FROM (\
+         SELECT MAX(COUNT(*) - 1, 0) AS extra FROM action_outcomes \
+         GROUP BY recommendation_id, minutes_since_action HAVING COUNT(*) > 1)",
+    )
+}
+
+fn invalid_action_outcome_count(conn: &Connection) -> i64 {
+    if !table_exists(conn, "action_outcomes").unwrap_or(false)
+        || !column_exists(conn, "action_outcomes", "outcome_quality").unwrap_or(false)
+    {
+        return 0;
+    }
+    scalar_count(
+        conn,
+        "SELECT COUNT(*) FROM action_outcomes WHERE COALESCE(outcome_quality, 'VALID') != 'VALID'",
+    )
+}
+
+fn data_integrity_warnings(conn: &Connection) -> Vec<String> {
+    let mut warnings = Vec::new();
+    push_count_warning(
+        &mut warnings,
+        scalar_count(
+            conn,
+            "SELECT COUNT(*) FROM recommendations WHERE COALESCE(accepted, 0) = 1 AND COALESCE(ignored, 0) = 1",
+        ),
+        "Recommendations marked accepted and ignored at the same time",
+    );
+    push_count_warning(
+        &mut warnings,
+        scalar_count(
+            conn,
+            "SELECT COUNT(*) FROM recommendations WHERE break_started_at IS NOT NULL AND break_finished_at IS NOT NULL AND julianday(break_finished_at) < julianday(break_started_at)",
+        ),
+        "Break rows where finished_at is before started_at",
+    );
+    push_count_warning(
+        &mut warnings,
+        scalar_count(
+            conn,
+            "SELECT COUNT(*) FROM recommendations WHERE COALESCE(actual_break_seconds, 0) < 0 OR COALESCE(actual_duration, 0) < 0",
+        ),
+        "Recommendations with negative break duration",
+    );
+    push_count_warning(
+        &mut warnings,
+        duplicate_action_outcome_count(conn),
+        "Duplicate action outcomes for the same recommendation horizon",
+    );
+    if table_exists(conn, "action_outcomes").unwrap_or(false)
+        && table_exists(conn, "recommendations").unwrap_or(false)
+    {
+        push_count_warning(
+            &mut warnings,
+            scalar_count(
+                conn,
+                "SELECT COUNT(*) FROM action_outcomes o \
+                 JOIN recommendations r ON r.id = o.recommendation_id \
+                 WHERE julianday(o.captured_at) < julianday(COALESCE(r.started_at, r.ignored_at, r.created_at, r.timestamp))",
+            ),
+            "Action outcomes captured before their recommendation/action time",
+        );
+    }
+    if table_exists(conn, "recommendations").unwrap_or(false)
+        && table_exists(conn, "ml_predictions").unwrap_or(false)
+    {
+        push_count_warning(
+            &mut warnings,
+            scalar_count(
+                conn,
+                "SELECT COUNT(*) FROM recommendations r \
+                 WHERE r.prediction_before_id IS NOT NULL \
+                 AND NOT EXISTS (SELECT 1 FROM ml_predictions p WHERE p.id = r.prediction_before_id)",
+            ),
+            "Recommendations reference missing prediction rows",
+        );
+        push_count_warning(
+            &mut warnings,
+            scalar_count(
+                conn,
+                "SELECT COUNT(*) FROM recommendations \
+                 WHERE COALESCE(task_id, task_before) IS NOT NULL AND task_category IS NULL",
+            ),
+            "Recommendation task/category metadata is incomplete",
+        );
+    }
+    if table_exists(conn, "synthetic_training_dataset").unwrap_or(false)
+        || table_exists(conn, "synthetic_telemetry").unwrap_or(false)
+    {
+        warnings.push("Synthetic tables are present in the real SQLite database".to_string());
+    }
+    warnings
+}
+
+fn push_count_warning(warnings: &mut Vec<String>, count: i64, label: &str) {
+    if count > 0 {
+        warnings.push(format!("{label}: {count}"));
+    }
+}
+
+#[derive(Debug, Clone)]
+struct ShadowOutcomeRow {
+    task_category: String,
+    effectiveness_before: f64,
+    effectiveness_after: f64,
+    recommended_action: String,
+}
+
+fn shadow_model_status(conn: &Connection) -> ShadowModelPayload {
+    let rows = load_shadow_outcome_rows(conn);
+    let training_outcomes = rows.len() as i64;
+    let mut status = personal_model_status(training_outcomes);
+    let mut payload = ShadowModelPayload {
+        status: status.clone(),
+        training_outcomes,
+        min_shadow_outcomes: PERSONALIZATION_EXPERIMENTAL_OUTCOMES,
+        demo_mae: None,
+        personal_mae: None,
+        action_agreement: None,
+        personal_better_predictions: 0,
+        demo_better_predictions: 0,
+        insufficient_unknown: 0,
+        personal_model_version: if training_outcomes >= PERSONALIZATION_EXPERIMENTAL_OUTCOMES {
+            Some(PERSONAL_SHADOW_MODEL_VERSION.to_string())
+        } else {
+            None
+        },
+        eligible_for_activation: false,
+        validation_method: "chronological_holdout_80_20".to_string(),
+    };
+    if rows.len() < (PERSONALIZATION_EXPERIMENTAL_OUTCOMES as usize) || rows.len() < 2 {
+        return payload;
+    }
+
+    let split_at = (((rows.len() as f64) * 0.8).floor() as usize).clamp(1, rows.len() - 1);
+    let (train, validation) = rows.split_at(split_at);
+    let global_delta = mean_delta(train);
+    let category_delta = category_deltas(train);
+    let mut demo_abs = 0.0;
+    let mut personal_abs = 0.0;
+    let mut agreement = 0i64;
+    let mut personal_better = 0i64;
+    let mut demo_better = 0i64;
+    let mut unknown = 0i64;
+
+    for row in validation {
+        let actual = row.effectiveness_after;
+        let demo_pred = row.effectiveness_before;
+        let correction = category_delta
+            .get(&row.task_category)
+            .copied()
+            .unwrap_or(global_delta);
+        let personal_pred = (row.effectiveness_before + correction).clamp(0.0, 100.0);
+        let demo_err = (actual - demo_pred).abs();
+        let personal_err = (actual - personal_pred).abs();
+        demo_abs += demo_err;
+        personal_abs += personal_err;
+        if personal_err + 0.01 < demo_err {
+            personal_better += 1;
+        } else if demo_err + 0.01 < personal_err {
+            demo_better += 1;
+        } else {
+            unknown += 1;
+        }
+        if normalize_action(&row.recommended_action) == shadow_action(personal_pred) {
+            agreement += 1;
+        }
+    }
+
+    let validation_len = validation.len() as f64;
+    let demo_mae = demo_abs / validation_len;
+    let personal_mae = personal_abs / validation_len;
+    payload.demo_mae = Some(round3(demo_mae));
+    payload.personal_mae = Some(round3(personal_mae));
+    payload.action_agreement = Some(round3(agreement as f64 / validation_len));
+    payload.personal_better_predictions = personal_better;
+    payload.demo_better_predictions = demo_better;
+    payload.insufficient_unknown = unknown;
+    payload.eligible_for_activation =
+        training_outcomes >= PERSONALIZATION_TARGET_OUTCOMES && personal_mae < demo_mae;
+    if training_outcomes >= PERSONALIZATION_TARGET_OUTCOMES && !payload.eligible_for_activation {
+        status = "EXPERIMENTAL".to_string();
+    }
+    payload.status = status;
+    payload
+}
+
+fn load_shadow_outcome_rows(conn: &Connection) -> Vec<ShadowOutcomeRow> {
+    if !table_exists(conn, "action_outcomes").unwrap_or(false)
+        || !table_exists(conn, "recommendations").unwrap_or(false)
+    {
+        return Vec::new();
+    }
+    let quality_filter =
+        if column_exists(conn, "action_outcomes", "outcome_quality").unwrap_or(false) {
+            "AND COALESCE(o.outcome_quality, 'VALID') = 'VALID'"
+        } else {
+            ""
+        };
+    let sql = format!(
+        "SELECT COALESCE(r.task_category, 'other'), r.effectiveness_before, o.effectiveness_after, \
+         COALESCE(r.recommended_action, o.action, 'CONTINUE') \
+         FROM action_outcomes o JOIN recommendations r ON r.id = o.recommendation_id \
+         WHERE o.minutes_since_action = 30 \
+         AND r.effectiveness_before IS NOT NULL AND o.effectiveness_after IS NOT NULL \
+         {quality_filter} \
+         ORDER BY COALESCE(r.created_at, r.timestamp), o.captured_at"
+    );
+    let Ok(mut stmt) = conn.prepare(&sql) else {
+        return Vec::new();
+    };
+    let Ok(rows) = stmt.query_map([], |row| {
+        Ok(ShadowOutcomeRow {
+            task_category: row.get::<_, String>(0)?,
+            effectiveness_before: row.get::<_, f64>(1)?,
+            effectiveness_after: row.get::<_, f64>(2)?,
+            recommended_action: row.get::<_, String>(3)?,
+        })
+    }) else {
+        return Vec::new();
+    };
+    rows.filter_map(Result::ok).collect()
+}
+
+fn mean_delta(rows: &[ShadowOutcomeRow]) -> f64 {
+    if rows.is_empty() {
+        return 0.0;
+    }
+    rows.iter()
+        .map(|row| row.effectiveness_after - row.effectiveness_before)
+        .sum::<f64>()
+        / rows.len() as f64
+}
+
+fn category_deltas(rows: &[ShadowOutcomeRow]) -> BTreeMap<String, f64> {
+    let mut totals = BTreeMap::<String, (f64, i64)>::new();
+    for row in rows {
+        let entry = totals.entry(row.task_category.clone()).or_default();
+        entry.0 += row.effectiveness_after - row.effectiveness_before;
+        entry.1 += 1;
+    }
+    totals
+        .into_iter()
+        .filter_map(|(key, (sum, count))| {
+            if count >= 3 {
+                Some((key, sum / count as f64))
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+fn normalize_action(value: &str) -> String {
+    if value.starts_with("BREAK") {
+        "BREAK".to_string()
+    } else {
+        "CONTINUE".to_string()
+    }
+}
+
+fn shadow_action(effectiveness: f64) -> String {
+    if effectiveness < 55.0 {
+        "BREAK".to_string()
+    } else {
+        "CONTINUE".to_string()
+    }
+}
+
+fn round3(value: f64) -> f64 {
+    (value * 1000.0).round() / 1000.0
+}
+
+fn outcome_quality_for(
+    action: &PendingAction,
+    metrics: &OutcomeWindowMetrics,
+    raw_telemetry_rows: i64,
+) -> (String, String) {
+    if raw_telemetry_rows == 0 {
+        return (
+            "TRACKING_STOPPED".to_string(),
+            "no raw telemetry rows in outcome window".to_string(),
+        );
+    }
+    if metrics.event_count == 0 {
+        return (
+            "INSUFFICIENT_DATA".to_string(),
+            "no telemetry rows in outcome window".to_string(),
+        );
+    }
+    if metrics.total_seconds < OUTCOME_MIN_EVENT_SECONDS {
+        return (
+            "INSUFFICIENT_DATA".to_string(),
+            format!(
+                "only {} seconds of telemetry in window",
+                metrics.total_seconds
+            ),
+        );
+    }
+    if metrics.idle_ratio >= OUTCOME_LONG_IDLE_RATIO {
+        return (
+            "LONG_IDLE".to_string(),
+            format!("idle ratio {:.2} in outcome window", metrics.idle_ratio),
+        );
+    }
+    let action_is_continue_like =
+        action.action.starts_with("IGNORE") || action.action == "CONTINUE";
+    if action_is_continue_like {
+        let after_category = task_category_for(metrics.task_after.as_deref());
+        if let (Some(before), Some(after)) = (action.task_category.as_deref(), after_category) {
+            if before != after {
+                return (
+                    "TASK_CHANGED".to_string(),
+                    format!("task category changed from {before} to {after}"),
+                );
+            }
+        } else if action.task_before.is_some() && metrics.task_after.is_none() {
+            return (
+                "TASK_CHANGED".to_string(),
+                "task disappeared during outcome window".to_string(),
+            );
+        }
+    }
+    ("VALID".to_string(), "usable real outcome".to_string())
+}
+
+fn telemetry_row_count(
+    conn: &Connection,
+    start: chrono::NaiveDateTime,
+    end: chrono::NaiveDateTime,
+) -> Result<i64, String> {
+    if !table_exists(conn, "activity_events")? {
+        return Ok(0);
+    }
+    conn.query_row(
+        "SELECT COUNT(*) FROM activity_events WHERE ts_start < ?2 AND ts_end > ?1",
+        params![start.to_string(), end.to_string()],
+        |row| row.get::<_, i64>(0),
+    )
+    .map_err(|err| err.to_string())
+}
+
+fn persist_shadow_prediction_for_outcome(conn: &Connection, outcome_id: i64) -> Result<(), String> {
+    if usable_action_outcome_count(conn) < PERSONALIZATION_EXPERIMENTAL_OUTCOMES {
+        return Ok(());
+    }
+    let row = conn
+        .query_row(
+            "SELECT r.id, r.effectiveness_before, r.decline_15, r.decline_30, r.decline_60, \
+             COALESCE(r.recommended_action, o.action, 'CONTINUE'), COALESCE(r.task_category, 'other'), \
+             o.effectiveness_after \
+             FROM action_outcomes o JOIN recommendations r ON r.id = o.recommendation_id \
+             WHERE o.id = ?1",
+            params![outcome_id],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, Option<f64>>(1)?.unwrap_or(0.0),
+                    row.get::<_, Option<f64>>(2)?.unwrap_or(0.0),
+                    row.get::<_, Option<f64>>(3)?.unwrap_or(0.0),
+                    row.get::<_, Option<f64>>(4)?.unwrap_or(0.0),
+                    row.get::<_, String>(5)?,
+                    row.get::<_, String>(6)?,
+                    row.get::<_, Option<f64>>(7)?.unwrap_or(0.0),
+                ))
+            },
+        )
+        .ok();
+    let Some((
+        recommendation_id,
+        demo_effectiveness,
+        demo_decline_15,
+        demo_decline_30,
+        demo_decline_60,
+        demo_action,
+        task_category,
+        actual_effectiveness_after,
+    )) = row
+    else {
+        return Ok(());
+    };
+    let correction = personal_delta_for_category(conn, &task_category, outcome_id)
+        .or_else(|| personal_global_delta(conn, outcome_id))
+        .unwrap_or(0.0);
+    let personal_effectiveness = (demo_effectiveness + correction).clamp(0.0, 100.0);
+    let risk_adjustment = (correction / 100.0).clamp(-0.30, 0.30);
+    let personal_decline_15 = (demo_decline_15 - risk_adjustment).clamp(0.0, 1.0);
+    let personal_decline_30 = (demo_decline_30 - risk_adjustment).clamp(0.0, 1.0);
+    let personal_decline_60 = (demo_decline_60 - risk_adjustment).clamp(0.0, 1.0);
+    let personal_action = shadow_action(personal_effectiveness);
+    let agreement = normalize_action(&demo_action) == personal_action;
+    conn.execute(
+        "INSERT OR IGNORE INTO personal_shadow_predictions (timestamp, recommendation_id, action_outcome_id, \
+         demo_effectiveness, demo_decline_15, demo_decline_30, demo_decline_60, demo_action, \
+         personal_effectiveness, personal_decline_15, personal_decline_30, personal_decline_60, \
+         personal_action, action_agreement, actual_effectiveness_after) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+        params![
+            chrono::Utc::now().naive_utc().to_string(),
+            recommendation_id,
+            outcome_id,
+            demo_effectiveness,
+            demo_decline_15,
+            demo_decline_30,
+            demo_decline_60,
+            demo_action,
+            personal_effectiveness,
+            personal_decline_15,
+            personal_decline_30,
+            personal_decline_60,
+            personal_action,
+            if agreement { 1 } else { 0 },
+            actual_effectiveness_after,
+        ],
+    )
+    .map_err(|err| err.to_string())?;
+    structured_log(
+        "shadow_inference",
+        serde_json::json!({"outcome_id": outcome_id, "agreement": agreement}),
+    );
+    Ok(())
+}
+
+fn personal_delta_for_category(
+    conn: &Connection,
+    task_category: &str,
+    exclude_outcome_id: i64,
+) -> Option<f64> {
+    conn.query_row(
+        "SELECT AVG(o.effectiveness_after - r.effectiveness_before) \
+         FROM action_outcomes o JOIN recommendations r ON r.id = o.recommendation_id \
+         WHERE o.id != ?1 AND COALESCE(o.outcome_quality, 'VALID') = 'VALID' \
+         AND COALESCE(r.task_category, 'other') = ?2 \
+         AND r.effectiveness_before IS NOT NULL AND o.effectiveness_after IS NOT NULL",
+        params![exclude_outcome_id, task_category],
+        |row| row.get::<_, Option<f64>>(0),
+    )
+    .unwrap_or(None)
+}
+
+fn personal_global_delta(conn: &Connection, exclude_outcome_id: i64) -> Option<f64> {
+    conn.query_row(
+        "SELECT AVG(o.effectiveness_after - r.effectiveness_before) \
+         FROM action_outcomes o JOIN recommendations r ON r.id = o.recommendation_id \
+         WHERE o.id != ?1 AND COALESCE(o.outcome_quality, 'VALID') = 'VALID' \
+         AND r.effectiveness_before IS NOT NULL AND o.effectiveness_after IS NOT NULL",
+        params![exclude_outcome_id],
+        |row| row.get::<_, Option<f64>>(0),
+    )
+    .unwrap_or(None)
 }
 
 fn latest_recommendation_status(conn: &Connection) -> Option<(i64, Option<String>, bool, bool)> {
@@ -596,6 +1274,7 @@ fn run_demo_ml_once() -> Result<serde_json::Value, String> {
 
 #[tauri::command]
 fn train_personal_model(min_samples: Option<i64>) -> Result<serde_json::Value, String> {
+    let _ = create_db_backup("personal_training");
     let mut command = python_collector_command()?;
     let min_samples = min_samples.unwrap_or(5).clamp(3, 500).to_string();
     command
@@ -615,12 +1294,19 @@ fn train_personal_model(min_samples: Option<i64>) -> Result<serde_json::Value, S
         .output()
         .map_err(|err| format!("Could not train personal ML model: {err}"))?;
     if !output.status.success() {
+        structured_log(
+            "personal_model_training_failed",
+            serde_json::json!({"status": output.status.to_string()}),
+        );
         return Err(format!(
             "Personal ML training exited with status {}.",
             output.status
         ));
     }
-    serde_json::from_slice(&output.stdout).map_err(|err| err.to_string())
+    let result: serde_json::Value =
+        serde_json::from_slice(&output.stdout).map_err(|err| err.to_string())?;
+    structured_log("personal_model_trained", result.clone());
+    Ok(result)
 }
 
 fn column_exists(conn: &Connection, table: &str, column: &str) -> Result<bool, String> {
@@ -671,8 +1357,15 @@ fn spawn_demo_ml_scheduler(app: AppHandle) {
         loop {
             if let Err(err) = run_demo_ml_once() {
                 eprintln!("Demo ML scheduler failed: {err}");
+                structured_log("inference_failed", serde_json::json!({"error": err}));
             } else if let Err(err) = deliver_latest_model_notification(&app) {
                 eprintln!("Demo ML notification delivery failed: {err}");
+                structured_log(
+                    "inference_completed",
+                    serde_json::json!({"notification_error": err}),
+                );
+            } else {
+                structured_log("inference_completed", serde_json::json!({}));
             }
             let settings = load_runtime_settings();
             let interval = settings
@@ -764,6 +1457,69 @@ fn spawn_self_report_scheduler(app: AppHandle) {
         }
         thread::sleep(Duration::from_secs(SELF_REPORT_SCHEDULER_INTERVAL_SECONDS));
     });
+}
+
+fn spawn_daily_health_check(app: AppHandle) {
+    thread::spawn(move || {
+        thread::sleep(Duration::from_secs(60));
+        loop {
+            if let Err(err) = run_daily_health_check(&app) {
+                eprintln!("Daily health check failed: {err}");
+            }
+            thread::sleep(Duration::from_secs(60 * 60));
+        }
+    });
+}
+
+fn run_daily_health_check(app: &AppHandle) -> Result<(), String> {
+    let db_path = attentionos_db_path()?;
+    if !db_path.exists() {
+        return Ok(());
+    }
+    let conn = Connection::open(db_path).map_err(|err| err.to_string())?;
+    ensure_runtime_state(&conn)?;
+    let today = Local::now().format("%Y-%m-%d").to_string();
+    if runtime_value(&conn, "last_daily_health_check_date").as_deref() == Some(today.as_str()) {
+        return Ok(());
+    }
+    let data_quality = data_quality_status(&conn);
+    let mut warnings = data_quality.warnings.clone();
+    if data_quality.telemetry == "STALE" || data_quality.telemetry == "EMPTY" {
+        warnings.push(format!("Telemetry status: {}", data_quality.telemetry));
+    }
+    if data_quality.last_inference_at.is_none() {
+        warnings.push("Inference has not produced a prediction yet".to_string());
+    }
+    if warnings.is_empty() {
+        set_runtime_value(&conn, "last_daily_health_check_date", &today)?;
+        structured_log("daily_health_check_ok", serde_json::json!({}));
+        return Ok(());
+    }
+    let notification_id = insert_app_notification(
+        &conn,
+        "AttentionOS",
+        "AttentionOS обнаружил проблему со сбором данных. Откройте диагностику.",
+        "system_health_warning",
+        "{\"source\":\"daily-health-check\"}",
+    )?;
+    set_runtime_value(&conn, "last_daily_health_check_date", &today)?;
+    set_runtime_value(
+        &conn,
+        "last_native_notification_id",
+        &notification_id.to_string(),
+    )?;
+    if !notifications_quiet_now(&load_runtime_settings()) {
+        show_app_notification(
+            app,
+            "AttentionOS",
+            "AttentionOS обнаружил проблему со сбором данных. Откройте диагностику.",
+        );
+    }
+    structured_log(
+        "daily_health_check_warn",
+        serde_json::json!({"warnings": warnings}),
+    );
+    Ok(())
 }
 
 fn complete_expired_break(app: &AppHandle) -> Result<(), String> {
@@ -870,6 +1626,29 @@ fn get_latest_demo_ml_prediction() -> Result<serde_json::Value, String> {
             }))
         })
         .map_err(|err| err.to_string())?;
+    if runtime_value(&conn, "break_state").as_deref() != Some("BREAK") {
+        let quality = data_quality_status(&conn);
+        if quality
+            .last_telemetry_age_seconds
+            .map(|age| age > STALE_TELEMETRY_THRESHOLD_SECONDS)
+            .unwrap_or(false)
+        {
+            prediction["status"] = serde_json::json!("warmup");
+            prediction["state"] = serde_json::json!("WORK");
+            prediction["reason"] =
+                serde_json::json!("Оценка временно недоступна: telemetry устарела.");
+            prediction["recommended_action"] = serde_json::json!("CONTINUE");
+            prediction["recommended_break_minutes"] = serde_json::Value::Null;
+            prediction["policy_source"] = serde_json::json!("STALE_TELEMETRY");
+            prediction["recommendation"]["action"] = serde_json::json!("CONTINUE");
+            prediction["recommendation"]["state"] = serde_json::json!("WORK");
+            prediction["recommendation"]["title"] = serde_json::json!("Оценка временно недоступна");
+            prediction["recommendation"]["reason"] =
+                serde_json::json!("latest telemetry is stale; ML recommendation suppressed.");
+            prediction["recommendation"]["recommended_break_minutes"] = serde_json::Value::Null;
+            prediction["recommendation"]["policy_source"] = serde_json::json!("STALE_TELEMETRY");
+        }
+    }
     if break_ignore_active(&conn) {
         prediction["state"] = serde_json::json!("WORK");
         prediction["recommended_action"] = serde_json::json!("CONTINUE");
@@ -1054,6 +1833,10 @@ fn start_break(minutes: Option<i64>) -> Result<BreakStatePayload, String> {
         )
         .map_err(|err| err.to_string())?;
     }
+    structured_log(
+        "break_started",
+        serde_json::json!({"planned_minutes": planned, "task_before": task_before}),
+    );
     get_break_state()
 }
 
@@ -1111,6 +1894,10 @@ fn ignore_break() -> Result<BreakStatePayload, String> {
         params!["break_state", "WORK"],
     )
     .map_err(|err| err.to_string())?;
+    structured_log(
+        "recommendation_ignored",
+        serde_json::json!({"recommendation_id": recommendation_id, "cooldown_until": until.to_string()}),
+    );
     get_break_state()
 }
 
@@ -1160,6 +1947,10 @@ fn complete_break_in_conn(conn: &Connection, now: chrono::NaiveDateTime) -> Resu
     set_runtime_value(conn, "ready_to_work_since", &now.to_string())?;
     set_runtime_value(conn, "pre_break_task_label", "")?;
     set_current_task_label_value(&restored_task)?;
+    structured_log(
+        "break_finished",
+        serde_json::json!({"recommendation_id": recommendation_id, "actual_seconds": actual_seconds}),
+    );
     Ok(())
 }
 
@@ -1258,6 +2049,7 @@ fn start_tracking(state: tauri::State<'_, CollectorProcess>) -> Result<(), Strin
         ));
     }
     *guard = Some(child);
+    structured_log("collector_started", serde_json::json!({}));
     Ok(())
 }
 
@@ -1313,12 +2105,22 @@ fn ensure_runtime_state(conn: &Connection) -> Result<(), String> {
     )
     .map_err(|err| err.to_string())?;
     conn.execute(
+        "CREATE TABLE IF NOT EXISTS self_reports (\
+         id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp TEXT NOT NULL, task_name TEXT, \
+         telemetry_window_start TEXT, telemetry_window_end TEXT, perceived_effectiveness INTEGER NOT NULL, \
+         perceived_fatigue INTEGER NOT NULL, task_difficulty INTEGER, note TEXT, \
+         prompt_reason TEXT DEFAULT 'MANUAL')",
+        [],
+    )
+    .map_err(|err| err.to_string())?;
+    conn.execute(
         "CREATE TABLE IF NOT EXISTS action_outcomes (\
          id INTEGER PRIMARY KEY AUTOINCREMENT, recommendation_id INTEGER NOT NULL, action TEXT NOT NULL, \
          captured_at TEXT NOT NULL, prediction_after_id INTEGER, effectiveness_after REAL, \
          decline_15_after REAL, decline_30_after REAL, decline_60_after REAL, \
          active_ratio_after REAL, switch_rate_after REAL, input_rate_after REAL, idle_ratio_after REAL, \
-         task_after TEXT, minutes_since_action INTEGER NOT NULL)",
+         task_after TEXT, minutes_since_action INTEGER NOT NULL, outcome_quality TEXT DEFAULT 'VALID', \
+         quality_reason TEXT)",
         [],
     )
     .map_err(|err| err.to_string())?;
@@ -1338,6 +2140,16 @@ fn ensure_runtime_state(conn: &Connection) -> Result<(), String> {
         [],
     )
     .ok();
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS personal_shadow_predictions (\
+         id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp TEXT NOT NULL, recommendation_id INTEGER NOT NULL, \
+         action_outcome_id INTEGER NOT NULL UNIQUE, demo_effectiveness REAL, demo_decline_15 REAL, \
+         demo_decline_30 REAL, demo_decline_60 REAL, demo_action TEXT, personal_effectiveness REAL, \
+         personal_decline_15 REAL, personal_decline_30 REAL, personal_decline_60 REAL, \
+         personal_action TEXT, action_agreement INTEGER, actual_effectiveness_after REAL)",
+        [],
+    )
+    .map_err(|err| err.to_string())?;
     conn.execute(
         "CREATE TABLE IF NOT EXISTS notifications (\
          id INTEGER PRIMARY KEY AUTOINCREMENT, created_at TEXT NOT NULL, title TEXT NOT NULL, body TEXT NOT NULL, \
@@ -1372,6 +2184,21 @@ fn ensure_runtime_state(conn: &Connection) -> Result<(), String> {
     ensure_column(conn, "recommendations", "actual_break_seconds", "INTEGER")?;
     ensure_column(conn, "recommendations", "task_id", "TEXT")?;
     ensure_column(conn, "recommendations", "task_category", "TEXT")?;
+    ensure_column(
+        conn,
+        "action_outcomes",
+        "outcome_quality",
+        "TEXT DEFAULT 'VALID'",
+    )?;
+    ensure_column(conn, "action_outcomes", "quality_reason", "TEXT")?;
+    if table_exists(conn, "self_reports").unwrap_or(false) {
+        ensure_column(
+            conn,
+            "self_reports",
+            "prompt_reason",
+            "TEXT DEFAULT 'MANUAL'",
+        )?;
+    }
     conn.execute(
         "UPDATE recommendations SET created_at = COALESCE(created_at, timestamp)",
         [],
@@ -1784,6 +2611,8 @@ struct PendingAction {
     recommendation_id: i64,
     action: String,
     action_at: chrono::NaiveDateTime,
+    task_before: Option<String>,
+    task_category: Option<String>,
 }
 
 fn capture_pending_action_outcomes() -> Result<usize, String> {
@@ -1811,11 +2640,15 @@ fn capture_pending_action_outcomes_in_conn(
             let prediction = latest_prediction_snapshot_at_or_before(conn, due_at)
                 .or_else(|| latest_prediction_snapshot(conn));
             let metrics = activity_window_metrics(conn, action.action_at, due_at)?;
+            let raw_telemetry_rows = telemetry_row_count(conn, action.action_at, due_at)?;
+            let (outcome_quality, quality_reason) =
+                outcome_quality_for(&action, &metrics, raw_telemetry_rows);
             conn.execute(
                 "INSERT OR IGNORE INTO action_outcomes (recommendation_id, action, captured_at, \
                  prediction_after_id, effectiveness_after, decline_15_after, decline_30_after, decline_60_after, \
-                 active_ratio_after, switch_rate_after, input_rate_after, idle_ratio_after, task_after, minutes_since_action) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+                 active_ratio_after, switch_rate_after, input_rate_after, idle_ratio_after, task_after, \
+                 minutes_since_action, outcome_quality, quality_reason) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
                 params![
                     action.recommendation_id,
                     action.action,
@@ -1831,11 +2664,24 @@ fn capture_pending_action_outcomes_in_conn(
                     metrics.idle_ratio,
                     metrics.task_after,
                     horizon,
+                    outcome_quality,
+                    quality_reason,
                 ],
             )
             .map_err(|err| err.to_string())?;
             if conn.changes() > 0 {
                 inserted += 1;
+                let outcome_id = conn.last_insert_rowid();
+                set_runtime_value(conn, "last_outcome_capture_at", &now.to_string())?;
+                persist_shadow_prediction_for_outcome(conn, outcome_id)?;
+                structured_log(
+                    "outcome_captured",
+                    serde_json::json!({
+                        "recommendation_id": action.recommendation_id,
+                        "horizon_minutes": horizon,
+                        "quality": outcome_quality,
+                    }),
+                );
             }
         }
     }
@@ -1867,7 +2713,8 @@ fn pending_actions(conn: &Connection) -> Result<Vec<PendingAction>, String> {
         .prepare(
             "SELECT id, recommended_action, COALESCE(recommended_break_minutes, recommended_duration), \
              COALESCE(accepted, 0), COALESCE(ignored, 0), \
-             COALESCE(break_started_at, started_at, ignored_at, timestamp) \
+             COALESCE(break_started_at, started_at, ignored_at, timestamp), \
+             COALESCE(task_id, task_before), task_category \
              FROM recommendations \
              WHERE COALESCE(accepted, 0) = 1 OR COALESCE(ignored, 0) = 1",
         )
@@ -1882,6 +2729,8 @@ fn pending_actions(conn: &Connection) -> Result<Vec<PendingAction>, String> {
             let accepted = row.get::<_, i64>(3)? == 1;
             let ignored = row.get::<_, i64>(4)? == 1;
             let raw_time = row.get::<_, String>(5)?;
+            let task_before = row.get::<_, Option<String>>(6)?;
+            let task_category = row.get::<_, Option<String>>(7)?;
             let action = if ignored {
                 format!("IGNORE_{recommended_action}")
             } else if accepted {
@@ -1891,17 +2740,20 @@ fn pending_actions(conn: &Connection) -> Result<Vec<PendingAction>, String> {
             } else {
                 "ACTION".to_string()
             };
-            Ok((id, action, raw_time))
+            Ok((id, action, raw_time, task_before, task_category))
         })
         .map_err(|err| err.to_string())?;
     let mut actions = Vec::new();
     for row in rows {
-        let (recommendation_id, action, raw_time) = row.map_err(|err| err.to_string())?;
+        let (recommendation_id, action, raw_time, task_before, task_category) =
+            row.map_err(|err| err.to_string())?;
         if let Ok(action_at) = parse_sqlite_time_utc(&raw_time) {
             actions.push(PendingAction {
                 recommendation_id,
                 action,
                 action_at,
+                task_before,
+                task_category,
             });
         }
     }
@@ -1962,6 +2814,8 @@ fn activity_window_metrics(
     let window_minutes = end.signed_duration_since(start).num_seconds().max(60) as f64 / 60.0;
     if events.is_empty() {
         return Ok(OutcomeWindowMetrics {
+            event_count: 0,
+            total_seconds: 0,
             active_ratio: 0.0,
             switch_rate: 0.0,
             input_rate: 0.0,
@@ -1986,6 +2840,8 @@ fn activity_window_metrics(
     let total_seconds = total_seconds.max(1);
     let switches = count_switches(&events) as f64;
     Ok(OutcomeWindowMetrics {
+        event_count: events.len(),
+        total_seconds,
         active_ratio: (active_seconds as f64 / total_seconds as f64).clamp(0.0, 1.0),
         switch_rate: switches / window_minutes,
         input_rate: input_events as f64 / window_minutes,
@@ -2099,6 +2955,9 @@ fn maybe_prompt_self_report(app: &AppHandle) -> Result<(), String> {
         return Ok(());
     }
     let local_time = Local::now().format("%H:%M").to_string();
+    let prompt_reason =
+        latest_self_report_trigger_reason(&conn).unwrap_or_else(|| "POST_BREAK".to_string());
+    set_runtime_value(&conn, "pending_self_report_prompt_reason", &prompt_reason)?;
     let body = format!("{local_time} - Как прошла последняя сессия?");
     let notification_id = insert_app_notification(
         &conn,
@@ -2134,6 +2993,34 @@ fn latest_self_report_trigger_time(conn: &Connection) -> Option<chrono::NaiveDat
     .and_then(|value| parse_sqlite_time_utc(&value).ok())
 }
 
+fn latest_self_report_trigger_reason(conn: &Connection) -> Option<String> {
+    if !table_exists(conn, "recommendations").unwrap_or(false) {
+        return None;
+    }
+    conn.query_row(
+        "SELECT completed_at, ignored_at FROM recommendations \
+         WHERE completed_at IS NOT NULL OR ignored_at IS NOT NULL \
+         ORDER BY COALESCE(completed_at, ignored_at) DESC LIMIT 1",
+        [],
+        |row| {
+            Ok((
+                row.get::<_, Option<String>>(0)?,
+                row.get::<_, Option<String>>(1)?,
+            ))
+        },
+    )
+    .ok()
+    .map(|(completed, ignored)| {
+        if completed.is_some() {
+            "POST_BREAK".to_string()
+        } else if ignored.is_some() {
+            "IGNORED_RECOMMENDATION".to_string()
+        } else {
+            "MANUAL".to_string()
+        }
+    })
+}
+
 fn prediction_snapshot(conn: &Connection, id: Option<i64>) -> Option<(f64, f64)> {
     prediction_snapshot_by_id(conn, id).map(|item| (item.effectiveness, item.decline_30))
 }
@@ -2152,6 +3039,7 @@ fn stop_tracking(state: tauri::State<'_, CollectorProcess>) -> Result<(), String
         let _ = child.wait();
     }
     *guard = None;
+    structured_log("collector_stopped", serde_json::json!({}));
     Ok(())
 }
 
@@ -2192,7 +3080,108 @@ fn export_data() -> Result<String, String> {
         serde_json::to_string_pretty(&payload).map_err(|err| err.to_string())?,
     )
     .map_err(|err| err.to_string())?;
+    structured_log(
+        "data_exported",
+        serde_json::json!({"path": output.display().to_string()}),
+    );
     Ok(output.display().to_string())
+}
+
+#[tauri::command]
+fn export_ml_dataset() -> Result<String, String> {
+    let db_path = attentionos_db_path()?;
+    let conn = Connection::open(db_path).map_err(|err| err.to_string())?;
+    ensure_runtime_state(&conn)?;
+    let export_dir = attentionos_data_dir()?.join("exports");
+    std::fs::create_dir_all(&export_dir).map_err(|err| err.to_string())?;
+    let stamp = Local::now().format("%Y%m%d_%H%M%S").to_string();
+    let csv_path = export_dir.join(format!("attentionos_ml_dataset_{stamp}.csv"));
+    let metadata_path = export_dir.join(format!("attentionos_ml_dataset_{stamp}.metadata.json"));
+    let headers = [
+        "recommendation_id",
+        "created_at",
+        "captured_at",
+        "minutes_since_action",
+        "task_id",
+        "task_category",
+        "recommended_action",
+        "action",
+        "accepted",
+        "ignored",
+        "recommended_break_minutes",
+        "actual_break_seconds",
+        "effectiveness_before",
+        "decline_15_before",
+        "decline_30_before",
+        "decline_60_before",
+        "break_benefit_before",
+        "effectiveness_after",
+        "decline_15_after",
+        "decline_30_after",
+        "decline_60_after",
+        "active_ratio_after",
+        "switch_rate_after",
+        "input_rate_after",
+        "idle_ratio_after",
+        "task_after",
+        "outcome_quality",
+        "quality_reason",
+        "self_report_effectiveness",
+        "self_report_fatigue",
+        "self_report_difficulty",
+        "self_report_prompt_reason",
+        "feature_schema_version",
+        "demo_model_version",
+    ];
+    let sql = format!(
+        "SELECT \
+         r.id, COALESCE(r.created_at, r.timestamp), o.captured_at, o.minutes_since_action, \
+         COALESCE(r.task_id, r.task_before), r.task_category, r.recommended_action, o.action, \
+         COALESCE(r.accepted, 0), COALESCE(r.ignored, 0), \
+         COALESCE(r.recommended_break_minutes, r.recommended_duration), r.actual_break_seconds, \
+         r.effectiveness_before, r.decline_15, r.decline_30, r.decline_60, r.break_benefit, \
+         o.effectiveness_after, o.decline_15_after, o.decline_30_after, o.decline_60_after, \
+         o.active_ratio_after, o.switch_rate_after, o.input_rate_after, o.idle_ratio_after, \
+         o.task_after, COALESCE(o.outcome_quality, 'VALID'), o.quality_reason, \
+         (SELECT sr.perceived_effectiveness FROM self_reports sr WHERE sr.timestamp <= o.captured_at ORDER BY sr.timestamp DESC LIMIT 1), \
+         (SELECT sr.perceived_fatigue FROM self_reports sr WHERE sr.timestamp <= o.captured_at ORDER BY sr.timestamp DESC LIMIT 1), \
+         (SELECT sr.task_difficulty FROM self_reports sr WHERE sr.timestamp <= o.captured_at ORDER BY sr.timestamp DESC LIMIT 1), \
+         (SELECT COALESCE(sr.prompt_reason, 'MANUAL') FROM self_reports sr WHERE sr.timestamp <= o.captured_at ORDER BY sr.timestamp DESC LIMIT 1), \
+         '{FEATURE_SCHEMA_VERSION}', COALESCE(r.model_version, '{DEMO_MODEL_VERSION}') \
+         FROM action_outcomes o JOIN recommendations r ON r.id = o.recommendation_id \
+         ORDER BY COALESCE(r.created_at, r.timestamp), o.minutes_since_action"
+    );
+    let rows = write_query_csv(&conn, &sql, &headers, &csv_path)?;
+    let data_quality = data_quality_status(&conn);
+    let shadow = shadow_model_status(&conn);
+    let metadata = serde_json::json!({
+        "dataset_version": "real-ml-v1",
+        "schema_version": SQLITE_SCHEMA_VERSION,
+        "app_version": APP_VERSION,
+        "exported_at": chrono::Utc::now().naive_utc().to_string(),
+        "timezone": Local::now().offset().to_string(),
+        "feature_version": FEATURE_SCHEMA_VERSION,
+        "demo_model_version": DEMO_MODEL_VERSION,
+        "personal_model_version": shadow.personal_model_version,
+        "rows": rows,
+        "synthetic_included": false,
+        "usable_outcomes": data_quality.usable_outcomes,
+        "invalid_outcomes": data_quality.invalid_outcomes,
+    });
+    std::fs::write(
+        &metadata_path,
+        serde_json::to_string_pretty(&metadata).map_err(|err| err.to_string())?,
+    )
+    .map_err(|err| err.to_string())?;
+    structured_log(
+        "ml_dataset_exported",
+        serde_json::json!({"csv": csv_path.display().to_string(), "rows": rows}),
+    );
+    Ok(format!(
+        "{} | {}",
+        csv_path.display(),
+        metadata_path.display()
+    ))
 }
 
 #[tauri::command]
@@ -2233,10 +3222,12 @@ fn delete_all_data() -> Result<(), String> {
 
 #[tauri::command]
 fn delete_model() -> Result<(), String> {
+    let _ = create_db_backup("delete_model");
     let model_dir = attentionos_data_dir()?.join("models");
     if model_dir.exists() {
         std::fs::remove_dir_all(model_dir).map_err(|err| err.to_string())?;
     }
+    structured_log("model_deleted", serde_json::json!({}));
     Ok(())
 }
 
@@ -2457,6 +3448,7 @@ fn table_exists(conn: &Connection, table: &str) -> Result<bool, String> {
 
 fn execute_delete(tables: &[&str]) -> Result<(), String> {
     let db_path = attentionos_db_path()?;
+    let _ = create_db_backup("delete_data");
     let conn = Connection::open(db_path).map_err(|err| err.to_string())?;
     for table in tables {
         if table_exists(&conn, table)? {
@@ -2464,7 +3456,129 @@ fn execute_delete(tables: &[&str]) -> Result<(), String> {
                 .map_err(|err| err.to_string())?;
         }
     }
+    structured_log("data_deleted", serde_json::json!({"tables": tables}));
     Ok(())
+}
+
+fn write_query_csv(
+    conn: &Connection,
+    sql: &str,
+    headers: &[&str],
+    output: &Path,
+) -> Result<usize, String> {
+    let mut file = File::create(output).map_err(|err| err.to_string())?;
+    writeln!(file, "{}", headers.join(",")).map_err(|err| err.to_string())?;
+    let mut stmt = conn.prepare(sql).map_err(|err| err.to_string())?;
+    let mut rows = stmt.query([]).map_err(|err| err.to_string())?;
+    let mut count = 0usize;
+    while let Some(row) = rows.next().map_err(|err| err.to_string())? {
+        let mut values = Vec::with_capacity(headers.len());
+        for index in 0..headers.len() {
+            let raw = match row.get_ref(index).map_err(|err| err.to_string())? {
+                rusqlite::types::ValueRef::Null => String::new(),
+                rusqlite::types::ValueRef::Integer(value) => value.to_string(),
+                rusqlite::types::ValueRef::Real(value) => value.to_string(),
+                rusqlite::types::ValueRef::Text(value) => {
+                    String::from_utf8_lossy(value).to_string()
+                }
+                rusqlite::types::ValueRef::Blob(_) => "[blob]".to_string(),
+            };
+            values.push(csv_escape(&raw));
+        }
+        writeln!(file, "{}", values.join(",")).map_err(|err| err.to_string())?;
+        count += 1;
+    }
+    Ok(count)
+}
+
+fn csv_escape(value: &str) -> String {
+    if value.contains(',') || value.contains('"') || value.contains('\n') || value.contains('\r') {
+        format!("\"{}\"", value.replace('"', "\"\""))
+    } else {
+        value.to_string()
+    }
+}
+
+fn create_db_backup(reason: &str) -> Result<Option<PathBuf>, String> {
+    let db_path = attentionos_db_path()?;
+    if !db_path.exists() {
+        return Ok(None);
+    }
+    let backup_dir = attentionos_data_dir()?.join("backups");
+    std::fs::create_dir_all(&backup_dir).map_err(|err| err.to_string())?;
+    let safe_reason = reason
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+    let output = backup_dir.join(format!(
+        "attentionos_{}_{}.db",
+        Local::now().format("%Y-%m-%d_%H%M%S"),
+        safe_reason
+    ));
+    std::fs::copy(&db_path, &output).map_err(|err| err.to_string())?;
+    rotate_backups(&backup_dir)?;
+    structured_log(
+        "db_backup_created",
+        serde_json::json!({"reason": reason, "path": output.display().to_string()}),
+    );
+    Ok(Some(output))
+}
+
+fn rotate_backups(backup_dir: &Path) -> Result<(), String> {
+    let mut entries = std::fs::read_dir(backup_dir)
+        .map_err(|err| err.to_string())?
+        .filter_map(Result::ok)
+        .filter(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with("attentionos_")
+        })
+        .collect::<Vec<_>>();
+    entries.sort_by_key(|entry| {
+        entry
+            .metadata()
+            .and_then(|metadata| metadata.modified())
+            .ok()
+    });
+    let remove_count = entries.len().saturating_sub(BACKUP_RETENTION);
+    for entry in entries.into_iter().take(remove_count) {
+        let _ = std::fs::remove_file(entry.path());
+    }
+    Ok(())
+}
+
+fn structured_log(event: &str, fields: serde_json::Value) {
+    let Ok(dir) = attentionos_data_dir().map(|dir| dir.join("logs")) else {
+        return;
+    };
+    if std::fs::create_dir_all(&dir).is_err() {
+        return;
+    }
+    let path = dir.join("runtime.log");
+    if path
+        .metadata()
+        .map(|metadata| metadata.len() > STRUCTURED_LOG_MAX_BYTES)
+        .unwrap_or(false)
+    {
+        let rotated = dir.join("runtime.log.1");
+        let _ = std::fs::remove_file(&rotated);
+        let _ = std::fs::rename(&path, rotated);
+    }
+    let entry = serde_json::json!({
+        "timestamp": chrono::Utc::now().naive_utc().to_string(),
+        "event": event,
+        "fields": fields,
+    });
+    if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(path) {
+        let _ = writeln!(file, "{entry}");
+    }
 }
 
 fn table_as_json(conn: &Connection, table: &str) -> Result<Vec<serde_json::Value>, String> {
@@ -3298,7 +4412,7 @@ fn daily_summary_from_db(conn: &Connection, date: &str) -> DailySummaryDb {
         summary.personalization_samples_today = scalar_count(
             conn,
             &format!(
-                "SELECT COUNT(*) FROM action_outcomes WHERE substr(datetime(captured_at, 'localtime'), 1, 10) = '{}'",
+                "SELECT COUNT(*) FROM action_outcomes WHERE COALESCE(outcome_quality, 'VALID') = 'VALID' AND substr(datetime(captured_at, 'localtime'), 1, 10) = '{}'",
                 date.replace('\'', "''")
             ),
         );
@@ -3308,6 +4422,7 @@ fn daily_summary_from_db(conn: &Connection, date: &str) -> DailySummaryDb {
                  FROM action_outcomes o \
                  JOIN recommendations r ON r.id = o.recommendation_id \
                  WHERE o.minutes_since_action = 30 AND r.accepted = 1 \
+                 AND COALESCE(o.outcome_quality, 'VALID') = 'VALID' \
                  AND o.effectiveness_after IS NOT NULL AND r.effectiveness_before IS NOT NULL \
                  AND substr(datetime(o.captured_at, 'localtime'), 1, 10) = ?1",
                 params![date],
@@ -3320,6 +4435,7 @@ fn daily_summary_from_db(conn: &Connection, date: &str) -> DailySummaryDb {
                  FROM action_outcomes o \
                  JOIN recommendations r ON r.id = o.recommendation_id \
                  WHERE o.minutes_since_action = 30 AND r.accepted = 1 \
+                 AND COALESCE(o.outcome_quality, 'VALID') = 'VALID' \
                  AND o.effectiveness_after IS NOT NULL AND r.effectiveness_before IS NOT NULL \
                  AND substr(datetime(o.captured_at, 'localtime'), 1, 10) = ?1",
                 params![date],
@@ -3478,6 +4594,15 @@ mod tests {
         assert!(columns.contains(&"recommendation_id".to_string()));
         assert!(columns.contains(&"minutes_since_action".to_string()));
         assert!(columns.contains(&"active_ratio_after".to_string()));
+        assert!(columns.contains(&"outcome_quality".to_string()));
+        let report_columns = conn
+            .prepare("PRAGMA table_info(self_reports)")
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(1))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert!(report_columns.contains(&"prompt_reason".to_string()));
     }
 
     #[test]
@@ -3543,6 +4668,154 @@ mod tests {
     }
 
     #[test]
+    fn outcome_quality_marks_task_changed_for_ignored_breaks() {
+        let conn = Connection::open_in_memory().unwrap();
+        ensure_runtime_state(&conn).unwrap();
+        create_activity_events_table(&conn);
+        let action_at = chrono::NaiveDate::from_ymd_opt(2026, 8, 23)
+            .unwrap()
+            .and_hms_opt(12, 0, 0)
+            .unwrap();
+        conn.execute(
+            "INSERT INTO ml_predictions (timestamp, model_version, effectiveness, decline_15m, decline_30m, decline_60m, break_benefit, recommended_action) \
+             VALUES (?1, 'demo-test', 50.0, 0.2, 0.3, 0.4, 6.0, 'CONTINUE')",
+            params![(action_at + chrono::Duration::minutes(15)).to_string()],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO recommendations (timestamp, created_at, recommended_action, recommended_duration, recommended_break_minutes, ignored, ignored_at, task_id, task_category, effectiveness_before) \
+             VALUES (?1, ?1, 'BREAK_15', 15, 15, 1, ?1, 'ml', 'ml', 50.0)",
+            params![action_at.to_string()],
+        )
+        .unwrap();
+        for index in 0..5 {
+            let start =
+                action_at + chrono::Duration::minutes(10) + chrono::Duration::seconds(index * 20);
+            conn.execute(
+                "INSERT INTO activity_events (ts_start, ts_end, process_name, idle_seconds, keyboard_events, mouse_events, task_label) \
+                 VALUES (?1, ?2, 'Code.exe', 0.0, 12, 4, 'english')",
+                params![
+                    start.to_string(),
+                    (start + chrono::Duration::seconds(15)).to_string(),
+                ],
+            )
+            .unwrap();
+        }
+
+        let inserted = capture_pending_action_outcomes_in_conn(
+            &conn,
+            action_at + chrono::Duration::minutes(16),
+        )
+        .unwrap();
+        let quality: String = conn
+            .query_row(
+                "SELECT outcome_quality FROM action_outcomes WHERE minutes_since_action = 15",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+
+        assert_eq!(inserted, 1);
+        assert_eq!(quality, "TASK_CHANGED");
+        assert_eq!(usable_action_outcome_count(&conn), 0);
+    }
+
+    #[test]
+    fn data_quality_counts_invalid_and_pending_outcomes() {
+        let conn = Connection::open_in_memory().unwrap();
+        ensure_runtime_state(&conn).unwrap();
+        let action_at = chrono::NaiveDate::from_ymd_opt(2026, 8, 23)
+            .unwrap()
+            .and_hms_opt(12, 0, 0)
+            .unwrap();
+        conn.execute(
+            "INSERT INTO recommendations (timestamp, created_at, recommended_action, accepted, started_at) \
+             VALUES (?1, ?1, 'BREAK_15', 1, ?1)",
+            params![action_at.to_string()],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO action_outcomes (recommendation_id, action, captured_at, minutes_since_action, outcome_quality) \
+             VALUES (1, 'BREAK_15', ?1, 15, 'LONG_IDLE')",
+            params![(action_at + chrono::Duration::minutes(15)).to_string()],
+        )
+        .unwrap();
+
+        let quality = data_quality_status(&conn);
+
+        assert_eq!(quality.invalid_outcomes, 1);
+        assert_eq!(quality.usable_outcomes, 0);
+        assert!(quality.incomplete_outcomes >= 2);
+    }
+
+    #[test]
+    fn outcome_quality_marks_tracking_stopped_without_raw_telemetry() {
+        let conn = Connection::open_in_memory().unwrap();
+        ensure_runtime_state(&conn).unwrap();
+        let action_at = chrono::NaiveDate::from_ymd_opt(2026, 8, 23)
+            .unwrap()
+            .and_hms_opt(12, 0, 0)
+            .unwrap();
+        conn.execute(
+            "INSERT INTO recommendations (timestamp, created_at, recommended_action, accepted, started_at, task_category, effectiveness_before) \
+             VALUES (?1, ?1, 'BREAK_15', 1, ?1, 'ml', 50.0)",
+            params![action_at.to_string()],
+        )
+        .unwrap();
+
+        capture_pending_action_outcomes_in_conn(&conn, action_at + chrono::Duration::minutes(16))
+            .unwrap();
+        let quality: String = conn
+            .query_row(
+                "SELECT outcome_quality FROM action_outcomes WHERE minutes_since_action = 15",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+
+        assert_eq!(quality, "TRACKING_STOPPED");
+    }
+
+    #[test]
+    fn shadow_model_uses_chronological_real_outcomes_only() {
+        let conn = Connection::open_in_memory().unwrap();
+        ensure_runtime_state(&conn).unwrap();
+        let base = chrono::NaiveDate::from_ymd_opt(2026, 8, 1)
+            .unwrap()
+            .and_hms_opt(9, 0, 0)
+            .unwrap();
+        for index in 0..35 {
+            let created = base + chrono::Duration::minutes(index * 90);
+            conn.execute(
+                "INSERT INTO recommendations (timestamp, created_at, recommended_action, accepted, started_at, task_category, effectiveness_before, decline_15, decline_30, decline_60) \
+                 VALUES (?1, ?1, 'CONTINUE', 0, ?1, 'ml', 60.0, 0.1, 0.2, 0.3)",
+                params![created.to_string()],
+            )
+            .unwrap();
+            let recommendation_id = conn.last_insert_rowid();
+            conn.execute(
+                "INSERT INTO action_outcomes (recommendation_id, action, captured_at, minutes_since_action, outcome_quality, effectiveness_after) \
+                 VALUES (?1, 'CONTINUE', ?2, 30, 'VALID', 65.0)",
+                params![
+                    recommendation_id,
+                    (created + chrono::Duration::minutes(30)).to_string(),
+                ],
+            )
+            .unwrap();
+        }
+
+        let shadow = shadow_model_status(&conn);
+
+        assert_eq!(shadow.status, "SHADOW");
+        assert_eq!(shadow.training_outcomes, 35);
+        assert!(shadow.personal_mae.unwrap() < shadow.demo_mae.unwrap());
+        assert_eq!(
+            shadow.personal_model_version.as_deref(),
+            Some(PERSONAL_SHADOW_MODEL_VERSION)
+        );
+    }
+
+    #[test]
     fn break_segments_and_state_markers_are_built_from_recommendations() {
         let conn = Connection::open_in_memory().unwrap();
         ensure_runtime_state(&conn).unwrap();
@@ -3590,10 +4863,12 @@ pub fn run() {
                 &handle,
                 load_runtime_settings().preferences.launch_on_startup,
             )?;
+            let _ = create_db_backup("startup");
             spawn_demo_ml_scheduler(handle.clone());
             spawn_break_monitor(handle.clone());
             spawn_outcome_capture_scheduler();
             spawn_self_report_scheduler(handle.clone());
+            spawn_daily_health_check(handle.clone());
             let show = MenuItem::with_id(app, "show", "Show AttentionOS", true, None::<&str>)?;
             let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
             let menu = Menu::with_items(app, &[&show, &quit])?;
@@ -3664,6 +4939,7 @@ pub fn run() {
             stop_tracking,
             get_tracking_status,
             export_data,
+            export_ml_dataset,
             delete_telemetry,
             delete_self_reports,
             delete_interventions,

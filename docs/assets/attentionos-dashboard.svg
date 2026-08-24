@@ -1,0 +1,64 @@
+<svg width="1280" height="760" viewBox="0 0 1280 760" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="AttentionOS dashboard preview">
+  <rect width="1280" height="760" rx="28" fill="#11161B"/>
+  <rect x="32" y="28" width="1216" height="704" rx="22" fill="#171C22" stroke="#2B333C"/>
+  <text x="64" y="76" fill="#F6F7F9" font-family="Segoe UI, Arial" font-size="28" font-weight="700">AttentionOS</text>
+  <text x="64" y="104" fill="#9AA6B2" font-family="Segoe UI, Arial" font-size="14">Local focus intelligence dashboard</text>
+  <rect x="1012" y="48" width="104" height="34" rx="17" fill="#183C36" stroke="#2F8F83"/>
+  <circle cx="1033" cy="65" r="5" fill="#3BA272"/>
+  <text x="1046" y="70" fill="#C9F0E9" font-family="Segoe UI, Arial" font-size="13" font-weight="600">Tracking</text>
+  <rect x="1130" y="48" width="76" height="34" rx="17" fill="#20262D" stroke="#34404B"/>
+  <text x="1153" y="70" fill="#D8DEE6" font-family="Segoe UI, Arial" font-size="13" font-weight="600">Settings</text>
+
+  <rect x="64" y="142" width="352" height="160" rx="14" fill="#20262D" stroke="#34404B"/>
+  <text x="88" y="176" fill="#AAB6C2" font-family="Segoe UI, Arial" font-size="12" font-weight="700">CURRENT STATE</text>
+  <text x="88" y="226" fill="#FFFFFF" font-family="Segoe UI, Arial" font-size="46" font-weight="800">WORK</text>
+  <text x="88" y="258" fill="#9AA6B2" font-family="Segoe UI, Arial" font-size="15">Effectiveness estimate: 78/100</text>
+  <rect x="88" y="274" width="88" height="24" rx="12" fill="#183C36"/>
+  <text x="107" y="291" fill="#9EE0D4" font-family="Segoe UI, Arial" font-size="12">DEMO MODEL</text>
+
+  <g fill="#20262D" stroke="#34404B">
+    <rect x="440" y="142" width="180" height="160" rx="14"/>
+    <rect x="644" y="142" width="180" height="160" rx="14"/>
+    <rect x="848" y="142" width="180" height="160" rx="14"/>
+    <rect x="1052" y="142" width="156" height="160" rx="14"/>
+  </g>
+  <g font-family="Segoe UI, Arial">
+    <text x="464" y="176" fill="#AAB6C2" font-size="12" font-weight="700">FOCUS TIME</text>
+    <text x="464" y="224" fill="#F6F7F9" font-size="34" font-weight="800">2h 40m</text>
+    <text x="464" y="252" fill="#9AA6B2" font-size="13">Selected task only</text>
+    <text x="668" y="176" fill="#AAB6C2" font-size="12" font-weight="700">ACTIVE TIME</text>
+    <text x="668" y="224" fill="#F6F7F9" font-size="34" font-weight="800">3h 12m</text>
+    <text x="668" y="252" fill="#9AA6B2" font-size="13">Keyboard and mouse</text>
+    <text x="872" y="176" fill="#AAB6C2" font-size="12" font-weight="700">DECLINE RISK</text>
+    <text x="872" y="224" fill="#F6F7F9" font-size="30" font-weight="800">18 / 31 / 54%</text>
+    <text x="872" y="252" fill="#9AA6B2" font-size="13">15/30/60 min</text>
+    <text x="1076" y="176" fill="#AAB6C2" font-size="12" font-weight="700">BREAK BENEFIT</text>
+    <text x="1076" y="224" fill="#F6F7F9" font-size="34" font-weight="800">4.8/10</text>
+  </g>
+
+  <rect x="64" y="334" width="1144" height="156" rx="14" fill="#20262D" stroke="#34404B"/>
+  <text x="88" y="370" fill="#F6F7F9" font-family="Segoe UI, Arial" font-size="20" font-weight="700">24-hour timeline</text>
+  <text x="88" y="392" fill="#9AA6B2" font-family="Segoe UI, Arial" font-size="13">Apps, tasks, idle gaps and breaks are separated by time and task changes.</text>
+  <rect x="88" y="426" width="1096" height="34" rx="8" fill="#11161B" stroke="#2B333C"/>
+  <rect x="230" y="426" width="120" height="34" rx="8" fill="#2F8F83"/>
+  <rect x="352" y="426" width="80" height="34" rx="8" fill="#4D7EA8"/>
+  <rect x="462" y="426" width="190" height="34" rx="8" fill="#2F8F83"/>
+  <rect x="654" y="426" width="72" height="34" rx="8" fill="#8C6A56"/>
+  <rect x="770" y="426" width="122" height="34" rx="8" fill="#7A6FBC"/>
+  <rect x="930" y="426" width="154" height="34" rx="8" fill="#4D7EA8"/>
+  <text x="88" y="476" fill="#7D8A97" font-family="Segoe UI, Arial" font-size="12">00:00</text>
+  <text x="620" y="476" fill="#7D8A97" font-family="Segoe UI, Arial" font-size="12">12:00</text>
+  <text x="1144" y="476" fill="#7D8A97" font-family="Segoe UI, Arial" font-size="12">24:00</text>
+
+  <rect x="64" y="522" width="552" height="170" rx="14" fill="#20262D" stroke="#34404B"/>
+  <rect x="656" y="522" width="552" height="170" rx="14" fill="#20262D" stroke="#34404B"/>
+  <text x="88" y="558" fill="#F6F7F9" font-family="Segoe UI, Arial" font-size="18" font-weight="700">State history</text>
+  <polyline points="94,656 160,620 226,598 292,612 358,570 424,608 490,632 556,586" fill="none" stroke="#2F8F83" stroke-width="4" stroke-linecap="round"/>
+  <polyline points="94,642 160,652 226,628 292,604 358,596 424,560 490,548 556,520" fill="none" stroke="#D99A32" stroke-width="3" stroke-linecap="round"/>
+  <text x="680" y="558" fill="#F6F7F9" font-family="Segoe UI, Arial" font-size="18" font-weight="700">Top apps</text>
+  <g font-family="Segoe UI, Arial" font-size="14" fill="#D8DEE6">
+    <text x="680" y="602">1. Code</text><rect x="820" y="588" width="260" height="10" rx="5" fill="#2F8F83"/>
+    <text x="680" y="632">2. Chrome</text><rect x="820" y="618" width="176" height="10" rx="5" fill="#4D7EA8"/>
+    <text x="680" y="662">3. English</text><rect x="820" y="648" width="108" height="10" rx="5" fill="#7A6FBC"/>
+  </g>
+</svg>

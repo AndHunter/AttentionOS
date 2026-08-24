@@ -14,6 +14,7 @@ from attentionos.sessions.builder import SessionBuilder
 from attentionos.storage.schema import ActivityEvent
 
 FEATURE_WINDOW_MINUTES = 30
+FEATURE_SCHEMA_VERSION = "v1"
 FOCUS_THRESHOLD_SECONDS = 25 * 60
 IDLE_THRESHOLD_SECONDS = 5 * 60
 
