@@ -386,10 +386,18 @@ fn get_notifications(limit: Option<i64>) -> Result<Vec<NotificationPayload>, Str
     }
 
     let max_rows = limit.unwrap_or(8).clamp(1, 50);
+    get_user_notifications_from_conn(&conn, max_rows)
+}
+
+fn get_user_notifications_from_conn(
+    conn: &Connection,
+    max_rows: i64,
+) -> Result<Vec<NotificationPayload>, String> {
     let mut stmt = conn
         .prepare(
             "SELECT id, created_at, title, body, state, kind
              FROM notifications
+             WHERE kind != 'system_health_warning'
              ORDER BY created_at DESC
              LIMIT ?1",
         )
@@ -1471,7 +1479,7 @@ fn spawn_daily_health_check(app: AppHandle) {
     });
 }
 
-fn run_daily_health_check(app: &AppHandle) -> Result<(), String> {
+fn run_daily_health_check(_app: &AppHandle) -> Result<(), String> {
     let db_path = attentionos_db_path()?;
     if !db_path.exists() {
         return Ok(());
@@ -1495,29 +1503,19 @@ fn run_daily_health_check(app: &AppHandle) -> Result<(), String> {
         structured_log("daily_health_check_ok", serde_json::json!({}));
         return Ok(());
     }
-    let notification_id = insert_app_notification(
-        &conn,
-        "AttentionOS",
-        "AttentionOS обнаружил проблему со сбором данных. Откройте диагностику.",
-        "system_health_warning",
-        "{\"source\":\"daily-health-check\"}",
-    )?;
     set_runtime_value(&conn, "last_daily_health_check_date", &today)?;
-    set_runtime_value(
-        &conn,
-        "last_native_notification_id",
-        &notification_id.to_string(),
-    )?;
-    if !notifications_quiet_now(&load_runtime_settings()) {
-        show_app_notification(
-            app,
-            "AttentionOS",
-            "AttentionOS обнаружил проблему со сбором данных. Откройте диагностику.",
-        );
-    }
     structured_log(
         "daily_health_check_warn",
-        serde_json::json!({"warnings": warnings}),
+        serde_json::json!({
+            "warnings": warnings,
+            "telemetry": data_quality.telemetry,
+            "recommendations": data_quality.recommendations,
+            "outcomes": data_quality.outcomes,
+            "self_reports": data_quality.self_reports,
+            "last_telemetry_age_seconds": data_quality.last_telemetry_age_seconds,
+            "last_inference_age_seconds": data_quality.last_inference_age_seconds,
+            "last_outcome_capture_age_seconds": data_quality.last_outcome_capture_age_seconds
+        }),
     );
     Ok(())
 }
@@ -4603,6 +4601,34 @@ mod tests {
             .collect::<Result<Vec<_>, _>>()
             .unwrap();
         assert!(report_columns.contains(&"prompt_reason".to_string()));
+    }
+
+    #[test]
+    fn user_notifications_hide_system_health_warnings() {
+        let conn = Connection::open_in_memory().unwrap();
+        ensure_runtime_state(&conn).unwrap();
+        insert_app_notification(
+            &conn,
+            "AttentionOS",
+            "Open diagnostics",
+            "system_health_warning",
+            "{}",
+        )
+        .unwrap();
+        let visible_id = insert_app_notification(
+            &conn,
+            "AttentionOS",
+            "Return to work",
+            "ml_ready_to_work",
+            "{}",
+        )
+        .unwrap();
+
+        let notifications = get_user_notifications_from_conn(&conn, 8).unwrap();
+
+        assert_eq!(notifications.len(), 1);
+        assert_eq!(notifications[0].id, visible_id);
+        assert_eq!(notifications[0].kind, "ml_ready_to_work");
     }
 
     #[test]
